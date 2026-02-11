@@ -50,6 +50,18 @@ jest.mock('@/assistant', () => ({
 	})),
 }));
 
+const mockLoadCodeBuilderSession = jest.fn();
+const mockSaveCodeBuilderSession = jest.fn();
+const mockGenerateCodeBuilderThreadId = jest.fn();
+jest.mock('@/code-builder/utils/code-builder-session', () => ({
+	// eslint-disable-next-line @typescript-eslint/no-unsafe-return
+	loadCodeBuilderSession: (...args: unknown[]) => mockLoadCodeBuilderSession(...args),
+	// eslint-disable-next-line @typescript-eslint/no-unsafe-return
+	saveCodeBuilderSession: (...args: unknown[]) => mockSaveCodeBuilderSession(...args),
+	// eslint-disable-next-line @typescript-eslint/no-unsafe-return
+	generateCodeBuilderThreadId: (...args: unknown[]) => mockGenerateCodeBuilderThreadId(...args),
+}));
+
 const mockRandomUUID = jest.fn();
 Object.defineProperty(global, 'crypto', {
 	value: {
@@ -467,6 +479,14 @@ describe('WorkflowBuilderAgent', () => {
 				})(),
 			);
 
+			// Default session mocks
+			mockGenerateCodeBuilderThreadId.mockReturnValue('test-thread-id');
+			mockLoadCodeBuilderSession.mockResolvedValue({
+				conversationEntries: [],
+				previousSummary: undefined,
+			});
+			mockSaveCodeBuilderSession.mockResolvedValue(undefined);
+
 			planningConfig = {
 				...config,
 				assistantHandler: mock<AssistantHandler>(),
@@ -525,14 +545,14 @@ describe('WorkflowBuilderAgent', () => {
 			expect(mockCodeWorkflowBuilderChat).toHaveBeenCalled();
 		});
 
-		it('should route to text_response and yield chunk without calling CodeWorkflowBuilder', async () => {
+		it('should route to planning and yield chunk without calling CodeWorkflowBuilder', async () => {
 			const chunk: StreamOutput = {
 				messages: [{ role: 'assistant', type: 'message', text: 'Here is a plan...' }],
 			};
 
 			mockPlanningAgentRun.mockImplementation(async function* () {
 				yield chunk;
-				return { route: 'text_response' };
+				return { route: 'planning' };
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);
@@ -554,7 +574,7 @@ describe('WorkflowBuilderAgent', () => {
 		it('should pass userId to planning agent run', async () => {
 			// eslint-disable-next-line require-yield
 			mockPlanningAgentRun.mockImplementation(async function* () {
-				return { route: 'text_response' };
+				return { route: 'planning' };
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);
@@ -576,7 +596,7 @@ describe('WorkflowBuilderAgent', () => {
 		it('should pass abortSignal to planning agent run', async () => {
 			// eslint-disable-next-line require-yield
 			mockPlanningAgentRun.mockImplementation(async function* () {
-				return { route: 'text_response' };
+				return { route: 'planning' };
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);
@@ -595,6 +615,139 @@ describe('WorkflowBuilderAgent', () => {
 			expect(mockPlanningAgentRun).toHaveBeenCalledWith(
 				expect.objectContaining({ abortSignal: controller.signal }),
 			);
+		});
+
+		it('should load session and pass sdkSessionId + conversationHistory to planning agent', async () => {
+			mockLoadCodeBuilderSession.mockResolvedValue({
+				conversationEntries: [{ type: 'build-request', message: 'previous build' }],
+				previousSummary: undefined,
+				sdkSessionId: 'sdk-prev',
+			});
+
+			// eslint-disable-next-line require-yield
+			mockPlanningAgentRun.mockImplementation(async function* () {
+				return { route: 'build_workflow' };
+			});
+
+			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const payload: ChatPayload = {
+				id: '123',
+				message: 'Build this',
+				featureFlags: { codeBuilder: true },
+				workflowContext: { currentWorkflow: { id: 'wf-1' } },
+			};
+
+			for await (const _ of planningAgent.chat(payload, 'user-456')) {
+				// consume
+			}
+
+			expect(mockPlanningAgentRun).toHaveBeenCalledWith(
+				expect.objectContaining({
+					sdkSessionId: 'sdk-prev',
+					conversationHistory: expect.arrayContaining([
+						{ type: 'build-request', message: 'previous build' },
+					]),
+				}),
+			);
+		});
+
+		it('should save assistant-exchange entry for ask_assistant route', async () => {
+			mockPlanningAgentRun.mockImplementation(async function* () {
+				yield {
+					messages: [{ role: 'assistant', type: 'message', text: 'Here is help' }],
+				} as StreamOutput;
+				return {
+					route: 'ask_assistant',
+					sdkSessionId: 'sdk-new',
+					assistantSummary: 'Helped with creds',
+				};
+			});
+
+			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const payload: ChatPayload = {
+				id: '123',
+				message: 'How do credentials work?',
+				featureFlags: { codeBuilder: true },
+				workflowContext: { currentWorkflow: { id: 'wf-1' } },
+			};
+
+			for await (const _ of planningAgent.chat(payload, 'user-456')) {
+				// consume
+			}
+
+			expect(mockSaveCodeBuilderSession).toHaveBeenCalledTimes(1);
+			const [, threadId, savedSession] = mockSaveCodeBuilderSession.mock.calls[0] as unknown[];
+			expect(threadId).toBe('test-thread-id');
+			expect(savedSession).toEqual(
+				expect.objectContaining({
+					conversationEntries: [
+						{
+							type: 'assistant-exchange',
+							userQuery: 'How do credentials work?',
+							assistantSummary: 'Helped with creds',
+						},
+					],
+					sdkSessionId: 'sdk-new',
+				}),
+			);
+		});
+
+		it('should save plan entry for planning route', async () => {
+			mockPlanningAgentRun.mockImplementation(async function* () {
+				yield {
+					messages: [{ role: 'assistant', type: 'message', text: 'Here is a plan' }],
+				} as StreamOutput;
+				return { route: 'planning' };
+			});
+
+			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const payload: ChatPayload = {
+				id: '123',
+				message: 'What approach should I take?',
+				featureFlags: { codeBuilder: true },
+				workflowContext: { currentWorkflow: { id: 'wf-1' } },
+			};
+
+			for await (const _ of planningAgent.chat(payload, 'user-456')) {
+				// consume
+			}
+
+			expect(mockSaveCodeBuilderSession).toHaveBeenCalledTimes(1);
+			const [, threadId, savedSession] = mockSaveCodeBuilderSession.mock.calls[0] as unknown[];
+			expect(threadId).toBe('test-thread-id');
+			expect(savedSession).toEqual(
+				expect.objectContaining({
+					conversationEntries: [
+						{
+							type: 'plan',
+							userQuery: 'What approach should I take?',
+							plan: 'Here is a plan',
+						},
+					],
+				}),
+			);
+		});
+
+		it('should NOT save session for build_workflow route', async () => {
+			// eslint-disable-next-line require-yield
+			mockPlanningAgentRun.mockImplementation(async function* () {
+				return { route: 'build_workflow' };
+			});
+
+			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const payload: ChatPayload = {
+				id: '123',
+				message: 'Build a workflow',
+				featureFlags: { codeBuilder: true },
+				workflowContext: { currentWorkflow: { id: 'wf-1' } },
+			};
+
+			for await (const _ of planningAgent.chat(payload, 'user-456')) {
+				// consume
+			}
+
+			// Session save should NOT be called — SessionChatHandler handles it
+			expect(mockSaveCodeBuilderSession).not.toHaveBeenCalled();
 		});
 	});
 });

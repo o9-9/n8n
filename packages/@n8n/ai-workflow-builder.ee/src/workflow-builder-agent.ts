@@ -23,6 +23,12 @@ import { parsePlanDecision } from './agents/planner.agent';
 import type { AssistantHandler } from './assistant';
 import { PlanningAgent } from './assistant';
 import { CodeWorkflowBuilder } from './code-builder';
+import {
+	type CodeBuilderSession,
+	loadCodeBuilderSession,
+	saveCodeBuilderSession,
+	generateCodeBuilderThreadId,
+} from './code-builder/utils/code-builder-session';
 import { ValidationError } from './errors';
 import { createMultiAgentWorkflowWithSubgraphs } from './multi-agent-workflow-subgraphs';
 import { SessionManagerService } from './session-manager.service';
@@ -301,23 +307,70 @@ export class WorkflowBuilderAgent {
 			return;
 		}
 
+		// 1. Load session (for sdkSessionId + history)
+		const workflowId = payload.workflowContext?.currentWorkflow?.id;
+		const resolvedUserId = userId ?? 'unknown';
+		let session: CodeBuilderSession | undefined;
+		let threadId: string | undefined;
+
+		if (workflowId) {
+			threadId = generateCodeBuilderThreadId(workflowId, resolvedUserId);
+			session = await loadCodeBuilderSession(this.checkpointer, threadId);
+		}
+
 		const planningAgent = new PlanningAgent({
 			llm: this.stageLLMs.builder,
 			assistantHandler: this.assistantHandler,
 			logger: this.logger,
 		});
 
-		const result = yield* planningAgent.run({
+		// 2. Run planning agent with session context — manually iterate to capture text
+		const gen = planningAgent.run({
 			payload,
-			userId: userId ?? 'unknown',
+			userId: resolvedUserId,
 			abortSignal,
-			sdkSessionId: undefined, // TODO Task 0.4: load from session
+			sdkSessionId: session?.sdkSessionId,
+			conversationHistory: session?.conversationEntries,
 		});
+
+		const collectedText: string[] = [];
+		let iterResult = await gen.next();
+		while (!iterResult.done) {
+			yield iterResult.value;
+			for (const msg of iterResult.value.messages ?? []) {
+				if (msg.type === 'message' && 'text' in msg) {
+					collectedText.push(msg.text);
+				}
+			}
+			iterResult = await gen.next();
+		}
+		const result = iterResult.value;
+
+		// 3. Save session for non-build routes
+		if (session && threadId) {
+			if (result.route === 'ask_assistant') {
+				session.conversationEntries.push({
+					type: 'assistant-exchange',
+					userQuery: payload.message,
+					assistantSummary: result.assistantSummary ?? '',
+				});
+				session.sdkSessionId = result.sdkSessionId;
+				await saveCodeBuilderSession(this.checkpointer, threadId, session);
+			} else if (result.route === 'planning') {
+				session.conversationEntries.push({
+					type: 'plan',
+					userQuery: payload.message,
+					plan: collectedText.join('\n'),
+				});
+				await saveCodeBuilderSession(this.checkpointer, threadId, session);
+			}
+			// build_workflow: SessionChatHandler saves
+		}
 
 		if (result.route === 'build_workflow') {
 			yield* this.runCodeWorkflowBuilder(payload, userId, abortSignal);
 		}
-		// ask_assistant and text_response: chunks already yielded by planning agent
+		// ask_assistant and planning: chunks already yielded by planning agent
 	}
 
 	private async *runMultiAgentSystem(

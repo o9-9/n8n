@@ -10,6 +10,7 @@ import type { StreamChunk, StreamOutput } from '@/types/streaming';
 
 import type { AssistantHandler } from './assistant-handler';
 import { BUILD_WORKFLOW_TOOL } from './build-workflow.tool';
+import { type ConversationEntry, entryToString } from '../code-builder/utils/code-builder-session';
 import type { ChatPayload } from '../workflow-builder-agent';
 
 // ---------------------------------------------------------------------------
@@ -27,10 +28,11 @@ export interface PlanningAgentParams {
 	userId: string;
 	abortSignal?: AbortSignal;
 	sdkSessionId?: string;
+	conversationHistory?: ConversationEntry[];
 }
 
 export interface PlanningAgentResult {
-	route: 'ask_assistant' | 'build_workflow' | 'text_response';
+	route: 'ask_assistant' | 'build_workflow' | 'planning';
 	sdkSessionId?: string;
 	assistantSummary?: string;
 }
@@ -57,7 +59,8 @@ const PLANNING_PROMPT = prompt()
 Rules:
 - Make exactly zero or one tool call
 - Pass the user's query faithfully to ask_assistant
-- Include the full user request as instructions for build_workflow`,
+- Include the full user request as instructions for build_workflow
+- Use conversation history (if provided) to understand context from previous turns`,
 	)
 	.build();
 
@@ -92,7 +95,7 @@ const BUILD_WORKFLOW_PLACEHOLDER = tool(async () => '', {
  * Single-step planning agent that classifies user messages and routes to either:
  * - `ask_assistant` — help/debug queries via AssistantHandler (no credits)
  * - `build_workflow` — workflow generation via CodeWorkflowBuilder (credits consumed)
- * - `text_response` — direct text reply for plan discussions (no credits)
+ * - `planning` — direct text reply for plan discussions (no credits)
  */
 export class PlanningAgent {
 	private readonly llm: BaseChatModel;
@@ -112,14 +115,20 @@ export class PlanningAgent {
 	 * Yields `StreamOutput` chunks and returns the routing result.
 	 */
 	async *run(params: PlanningAgentParams): AsyncGenerator<StreamOutput, PlanningAgentResult> {
-		const { payload, userId, abortSignal, sdkSessionId } = params;
+		const { payload, userId, abortSignal, sdkSessionId, conversationHistory } = params;
 
 		if (!this.llm.bindTools) {
 			throw new Error('LLM does not support bindTools');
 		}
 		const llmWithTools = this.llm.bindTools([ASK_ASSISTANT_TOOL, BUILD_WORKFLOW_PLACEHOLDER]);
 
-		const messages = [new SystemMessage(PLANNING_PROMPT), new HumanMessage(payload.message)];
+		let systemContent = PLANNING_PROMPT;
+		if (conversationHistory && conversationHistory.length > 0) {
+			const lines = conversationHistory.map((e, i) => `${i + 1}. ${entryToString(e)}`);
+			systemContent += `\n\nConversation history:\n${lines.join('\n')}`;
+		}
+
+		const messages = [new SystemMessage(systemContent), new HumanMessage(payload.message)];
 
 		const response: AIMessageChunk = await llmWithTools.invoke(messages, {
 			signal: abortSignal,
@@ -137,7 +146,7 @@ export class PlanningAgent {
 					text,
 				});
 			}
-			return { route: 'text_response' };
+			return { route: 'planning' };
 		}
 
 		const toolCall = toolCalls[0];

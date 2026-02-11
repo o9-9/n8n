@@ -1,6 +1,7 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { AIMessage } from '@langchain/core/messages';
 
+import type { ConversationEntry } from '../../code-builder/utils/code-builder-session';
 import type { StreamOutput } from '../../types/streaming';
 import type { AssistantHandler } from '../assistant-handler';
 import { PlanningAgent } from '../planning-agent';
@@ -130,7 +131,7 @@ describe('PlanningAgent', () => {
 	// -----------------------------------------------------------------------
 	// Test 3: LLM returns text-only response (no tool calls)
 	// -----------------------------------------------------------------------
-	it('should yield text as AgentMessageChunk and return text_response route', async () => {
+	it('should yield text as AgentMessageChunk and return planning route', async () => {
 		const response = new AIMessage({
 			content: 'Here is a plan: first we add a trigger, then a Slack node.',
 		});
@@ -142,7 +143,7 @@ describe('PlanningAgent', () => {
 			agent.run({ payload: createMockPayload(), userId: 'user-1' }),
 		);
 
-		expect(result.route).toBe('text_response');
+		expect(result.route).toBe('planning');
 		expect(chunks).toHaveLength(1);
 		expect(chunks[0].messages[0]).toEqual(
 			expect.objectContaining({
@@ -157,7 +158,7 @@ describe('PlanningAgent', () => {
 	// -----------------------------------------------------------------------
 	// Test 4: LLM returns no content and no tool calls
 	// -----------------------------------------------------------------------
-	it('should handle empty response gracefully and return text_response', async () => {
+	it('should handle empty response gracefully and return planning', async () => {
 		const response = new AIMessage({ content: '' });
 		const llm = createMockLlm(response);
 		const handler = createMockAssistantHandler();
@@ -167,7 +168,7 @@ describe('PlanningAgent', () => {
 			agent.run({ payload: createMockPayload(), userId: 'user-1' }),
 		);
 
-		expect(result.route).toBe('text_response');
+		expect(result.route).toBe('planning');
 		expect(chunks).toHaveLength(0); // no text to yield
 		expect(handler.execute).not.toHaveBeenCalled();
 	});
@@ -245,5 +246,71 @@ describe('PlanningAgent', () => {
 			expect.stringContaining('Unknown tool call'),
 			expect.objectContaining({ toolName: 'unknown_tool' }),
 		);
+	});
+
+	// -----------------------------------------------------------------------
+	// Test 7: Conversation history included in system message
+	// -----------------------------------------------------------------------
+	it('should include conversation history in LLM system message when provided', async () => {
+		const response = new AIMessage({ content: 'Noted context.' });
+		const llm = createMockLlm(response);
+		const handler = createMockAssistantHandler();
+
+		const history: ConversationEntry[] = [
+			{ type: 'build-request', message: 'Build a Slack workflow' },
+			{ type: 'assistant-exchange', userQuery: 'How?', assistantSummary: 'Use Slack node' },
+		];
+
+		const agent = new PlanningAgent({ llm, assistantHandler: handler });
+		await collectGenerator(
+			agent.run({
+				payload: createMockPayload('Next step?'),
+				userId: 'user-1',
+				conversationHistory: history,
+			}),
+		);
+
+		// Get the bound model's invoke call to inspect messages
+		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
+		const boundModel = (llm.bindTools as jest.Mock).mock.results[0].value;
+		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
+		const invokeArgs = (boundModel.invoke as jest.Mock).mock.calls[0][0];
+		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+		const systemMessage = invokeArgs[0];
+
+		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+		expect(systemMessage.content).toContain('Conversation history:');
+		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+		expect(systemMessage.content).toContain('Build a Slack workflow');
+		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+		expect(systemMessage.content).toContain('[Help] Q: How?');
+	});
+
+	// -----------------------------------------------------------------------
+	// Test 8: No history section when conversationHistory is empty
+	// -----------------------------------------------------------------------
+	it('should not include conversation history section when empty', async () => {
+		const response = new AIMessage({ content: 'Reply.' });
+		const llm = createMockLlm(response);
+		const handler = createMockAssistantHandler();
+
+		const agent = new PlanningAgent({ llm, assistantHandler: handler });
+		await collectGenerator(
+			agent.run({
+				payload: createMockPayload(),
+				userId: 'user-1',
+				conversationHistory: [],
+			}),
+		);
+
+		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
+		const boundModel = (llm.bindTools as jest.Mock).mock.results[0].value;
+		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
+		const invokeArgs = (boundModel.invoke as jest.Mock).mock.calls[0][0];
+		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+		const systemMessage = invokeArgs[0];
+
+		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+		expect(systemMessage.content).not.toContain('Conversation history:');
 	});
 });
