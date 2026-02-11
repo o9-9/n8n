@@ -1,23 +1,24 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { AIMessageChunk, BaseMessage } from '@langchain/core/messages';
-import { HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
+import { AIMessage, HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
 import type { Logger } from '@n8n/backend-common';
 
+import { extractTextContent } from '@/code-builder/utils/content-extractors';
 import { prompt } from '@/prompts/builder';
 import type { StreamChunk, StreamOutput } from '@/types/streaming';
 
 import { ASK_ASSISTANT_TOOL } from './ask-assistant.tool';
 import type { AssistantHandler } from './assistant-handler';
 import { BUILD_WORKFLOW_TOOL } from './build-workflow.tool';
-import { type ConversationEntry, entryToString } from '../code-builder/utils/code-builder-session';
-import type { ChatPayload } from '../workflow-builder-agent';
 import type { StreamWriter } from './types';
+import type { ChatPayload } from '../workflow-builder-agent';
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+type TriageConversationEntry =
+	| { type: 'build-request'; message: string }
+	| { type: 'assistant-exchange'; userQuery: string; assistantSummary: string }
+	| { type: 'plan'; userQuery: string; plan: string };
 
-export interface PlanningAgentConfig {
+export interface TriageAgentConfig {
 	llm: BaseChatModel;
 	assistantHandler: AssistantHandler;
 	buildWorkflow: (
@@ -28,15 +29,21 @@ export interface PlanningAgentConfig {
 	logger?: Logger;
 }
 
-export interface PlanningAgentParams {
+export interface TriageAgentParams {
 	payload: ChatPayload;
 	userId: string;
 	abortSignal?: AbortSignal;
 	sdkSessionId?: string;
-	conversationHistory?: ConversationEntry[];
+	conversationHistory?: TriageConversationEntry[];
 }
 
-export interface PlanningAgentOutcome {
+/**
+ * Public return type from `TriageAgent.run()`.
+ * Intentionally mirrors `TriageAgentState` today. Kept separate so that
+ * internal-only fields (e.g. iteration counters) can be added to the state
+ * later without leaking through the public API.
+ */
+export interface TriageAgentOutcome {
 	sdkSessionId?: string;
 	assistantSummary?: string;
 	buildExecuted?: boolean;
@@ -45,31 +52,24 @@ export interface PlanningAgentOutcome {
 /** Result of dispatching a single tool call */
 interface ToolResult {
 	content: string;
-	terminal?: boolean;
+	/** When true, exit the agent loop immediately — don't send the result back to the LLM. */
+	endLoop?: boolean;
 }
 
 /** Mutable state tracked across agent loop iterations */
-interface PlanningAgentState {
+interface TriageAgentState {
 	sdkSessionId?: string;
 	assistantSummary?: string;
 	buildExecuted?: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 /** Maximum agent loop iterations to prevent runaway loops */
 const MAX_ITERATIONS = 10;
 
-// ---------------------------------------------------------------------------
-// Prompt
-// ---------------------------------------------------------------------------
-
-const PLANNING_PROMPT = prompt()
+const TRIAGE_PROMPT = prompt()
 	.section(
 		'role',
-		`You are a routing agent for the n8n workflow builder.
+		`You are a triage agent for the n8n workflow builder.
 You have tools available. Use them when appropriate, or respond directly if neither tool fits.
 
 Rules:
@@ -81,21 +81,17 @@ Rules:
 	)
 	.build();
 
-// ---------------------------------------------------------------------------
-// PlanningAgent
-// ---------------------------------------------------------------------------
-
 /**
- * Planning agent that classifies user messages and executes tools directly:
+ * Triage agent that classifies user messages and executes tools directly:
  * - `ask_assistant` — help/debug queries via AssistantHandler (no credits)
  * - `build_workflow` — workflow generation via CodeWorkflowBuilder (credits consumed)
- * - direct text reply — plan discussions (no credits)
+ * - direct text reply — conversational responses (no credits)
  *
  * Unlike a router, this agent executes tools in-place, streaming all chunks
  * (assistant + builder) through a single generator. The consumer sees the
  * final outcome (facts, not routing decisions) after the generator completes.
  */
-export class PlanningAgent {
+export class TriageAgent {
 	private readonly llm: BaseChatModel;
 
 	private readonly assistantHandler: AssistantHandler;
@@ -108,7 +104,7 @@ export class PlanningAgent {
 
 	private readonly logger?: Logger;
 
-	constructor(config: PlanningAgentConfig) {
+	constructor(config: TriageAgentConfig) {
 		this.llm = config.llm;
 		this.assistantHandler = config.assistantHandler;
 		this.buildWorkflow = config.buildWorkflow;
@@ -116,11 +112,11 @@ export class PlanningAgent {
 	}
 
 	/**
-	 * Run the planning agent loop: LLM -> tool call -> execute -> ToolMessage -> loop.
+	 * Run the triage agent loop: LLM -> tool call -> execute -> ToolMessage -> loop.
 	 * The loop is tool-agnostic — all tool knowledge lives in executeTool().
 	 * Yields `StreamOutput` chunks and returns the outcome.
 	 */
-	async *run(params: PlanningAgentParams): AsyncGenerator<StreamOutput, PlanningAgentOutcome> {
+	async *run(params: TriageAgentParams): AsyncGenerator<StreamOutput, TriageAgentOutcome> {
 		const { payload, userId, abortSignal, sdkSessionId, conversationHistory } = params;
 
 		if (!this.llm.bindTools) {
@@ -128,9 +124,22 @@ export class PlanningAgent {
 		}
 		const llmWithTools = this.llm.bindTools([ASK_ASSISTANT_TOOL, BUILD_WORKFLOW_TOOL]);
 
-		let systemContent = PLANNING_PROMPT;
+		const conversationEntryToString = (entry: PlanningConversationEntry): string => {
+			switch (entry.type) {
+				case 'build-request':
+					return entry.message;
+				case 'assistant-exchange':
+					return `[Help] Q: ${entry.userQuery} → A: ${entry.assistantSummary}`;
+				case 'plan':
+					return `[Plan] Q: ${entry.userQuery} → ${entry.plan}`;
+			}
+		};
+
+		let systemContent = TRIAGE_PROMPT;
 		if (conversationHistory && conversationHistory.length > 0) {
-			const lines = conversationHistory.map((e, i) => `${i + 1}. ${entryToString(e)}`);
+			const lines = conversationHistory.map((entry, index) => {
+				return `${index + 1}. ${conversationEntryToString(entry)}`;
+			});
 			systemContent += `\n\nConversation history:\n${lines.join('\n')}`;
 		}
 
@@ -140,7 +149,7 @@ export class PlanningAgent {
 		];
 
 		const ctx = { userId, payload, abortSignal };
-		const state: PlanningAgentState = { sdkSessionId };
+		const state: TriageAgentState = { sdkSessionId };
 
 		let reachedMaxIterations = true;
 
@@ -152,9 +161,11 @@ export class PlanningAgent {
 
 			const toolCalls = response.tool_calls ?? [];
 
-			// No tool call -> natural termination (text response)
 			if (toolCalls.length === 0) {
-				const text = typeof response.content === 'string' ? response.content : '';
+				this.logger?.debug('[TriageAgent] No tool call, responding with text', {
+					iteration: iteration + 1,
+				});
+				const text = extractTextContent(new AIMessage({ content: response.content })) ?? '';
 				if (text) {
 					yield this.wrapChunk({
 						role: 'assistant',
@@ -166,10 +177,19 @@ export class PlanningAgent {
 				break;
 			}
 
-			// Process tool calls — loop is tool-agnostic
 			for (const toolCall of toolCalls) {
+				this.logger?.debug('[TriageAgent] Tool called', {
+					toolName: toolCall.name,
+					iteration: iteration + 1,
+				});
 				const toolCallId = toolCall.id ?? `tc-${iteration}`;
 				const result = yield* this.executeToolWithStreaming(toolCall, ctx, state);
+
+				this.logger?.debug('[TriageAgent] Tool completed', {
+					toolName: toolCall.name,
+					iteration: iteration + 1,
+					endLoop: result.endLoop,
+				});
 
 				messages.push(
 					new ToolMessage({
@@ -178,34 +198,33 @@ export class PlanningAgent {
 					}),
 				);
 
-				if (result.terminal) {
+				if (result.endLoop) {
 					return this.getOutcome(state);
 				}
 			}
-
-			// Loop continues — LLM sees tool results on next iteration
 		}
 
 		if (reachedMaxIterations) {
-			this.logger?.warn('[PlanningAgent] Max iterations reached');
+			this.logger?.warn('[TriageAgent] Max iterations reached');
 		}
 
 		return this.getOutcome(state);
 	}
 
-	// -----------------------------------------------------------------------
-	// Tool execution bridge
-	// -----------------------------------------------------------------------
-
 	/**
 	 * Generic bridge: starts a tool, drains its streaming queue concurrently,
 	 * and yields chunks as they arrive. Tool-agnostic — all tool knowledge
 	 * lives in executeTool().
+	 *
+	 * The bridge is strictly needed for callback-based tools (`ask_assistant`,
+	 * where the writer callback pushes chunks). For generator-based tools
+	 * (`build_workflow`) the bridge adds minimal overhead but keeps all tools
+	 * on a single uniform path, making it trivial to add future tools.
 	 */
 	private async *executeToolWithStreaming(
 		toolCall: { name: string; args: Record<string, unknown> },
 		ctx: { userId: string; payload: ChatPayload; abortSignal?: AbortSignal },
-		state: PlanningAgentState,
+		state: TriageAgentState,
 	): AsyncGenerator<StreamOutput, ToolResult> {
 		const queue: StreamOutput[] = [];
 		let resolveNext: (() => void) | undefined;
@@ -221,7 +240,6 @@ export class PlanningAgent {
 			resolveNext?.();
 		});
 
-		// Drain the queue while the tool runs
 		while (!done || queue.length > 0) {
 			if (queue.length > 0) {
 				yield queue.shift()!;
@@ -236,12 +254,10 @@ export class PlanningAgent {
 			}
 		}
 
+		// Re-throws if executeTool() errored, after any partial chunks have been
+		// drained and yielded by the while-loop above.
 		return await toolPromise;
 	}
-
-	// -----------------------------------------------------------------------
-	// Tool executors
-	// -----------------------------------------------------------------------
 
 	/**
 	 * Plain async function containing all tool knowledge. Streams via
@@ -250,7 +266,7 @@ export class PlanningAgent {
 	private async executeTool(
 		toolCall: { name: string; args: Record<string, unknown> },
 		ctx: { userId: string; payload: ChatPayload; abortSignal?: AbortSignal },
-		state: PlanningAgentState,
+		state: TriageAgentState,
 		enqueue: (output: StreamOutput) => void,
 	): Promise<ToolResult> {
 		switch (toolCall.name) {
@@ -264,6 +280,7 @@ export class PlanningAgent {
 					this.wrapChunk({
 						type: 'tool',
 						toolName: 'assistant',
+						customDisplayTitle: 'Asking assistant',
 						status: 'running',
 					}),
 				);
@@ -288,7 +305,6 @@ export class PlanningAgent {
 					ctx.abortSignal,
 				);
 
-				// Yield tool progress: completed
 				enqueue(
 					this.wrapChunk({
 						type: 'tool',
@@ -303,39 +319,35 @@ export class PlanningAgent {
 			}
 
 			case 'build_workflow': {
+				// We pass the original payload (not toolCall.args.instructions) because
+				// CodeWorkflowBuilder.chat() needs full context (workflow state, feature
+				// flags, etc.). The LLM's `instructions` field serves as chain-of-thought
+				// for the routing decision and is useful in LangSmith traces.
 				for await (const chunk of this.buildWorkflow(ctx.payload, ctx.userId, ctx.abortSignal)) {
 					enqueue(chunk);
 				}
 				state.buildExecuted = true;
-				return { content: 'Workflow built.', terminal: true };
+				return { content: 'Workflow built.', endLoop: true };
 			}
 
 			default:
-				this.logger?.warn('[PlanningAgent] Unknown tool call', {
+				this.logger?.warn('[TriageAgent] Unknown tool call', {
 					toolName: toolCall.name,
 				});
 				return { content: `Unknown tool: ${toolCall.name}` };
 		}
 	}
 
-	// -----------------------------------------------------------------------
-	// Outcome
-	// -----------------------------------------------------------------------
-
 	/**
 	 * Trivial state copy — returns facts about what happened, not routing decisions.
 	 */
-	private getOutcome(state: PlanningAgentState): PlanningAgentOutcome {
+	private getOutcome(state: TriageAgentState): TriageAgentOutcome {
 		return {
 			sdkSessionId: state.sdkSessionId,
 			assistantSummary: state.assistantSummary,
 			buildExecuted: state.buildExecuted,
 		};
 	}
-
-	// -----------------------------------------------------------------------
-	// Helpers
-	// -----------------------------------------------------------------------
 
 	private wrapChunk(chunk: StreamChunk): StreamOutput {
 		return { messages: [chunk] };

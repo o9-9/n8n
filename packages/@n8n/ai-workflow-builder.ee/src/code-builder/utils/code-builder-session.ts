@@ -218,7 +218,6 @@ export async function compactSessionIfNeeded(
 		return session;
 	}
 
-	// Get the oldest entries to compact
 	const oldEntries = session.conversationEntries.slice(0, MESSAGES_TO_COMPACT);
 	const recentEntries = session.conversationEntries.slice(MESSAGES_TO_COMPACT);
 

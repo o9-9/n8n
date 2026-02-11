@@ -1,6 +1,6 @@
 export { AssistantHandler } from './assistant-handler';
-export { PlanningAgent } from './planning-agent';
-export type { PlanningAgentConfig, PlanningAgentOutcome } from './planning-agent';
+export { TriageAgent } from './triage-agent';
+export type { TriageAgentConfig, TriageAgentOutcome } from './triage-agent';
 export type {
 	AssistantContext,
 	AssistantResult,

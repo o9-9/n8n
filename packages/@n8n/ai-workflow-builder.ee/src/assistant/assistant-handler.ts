@@ -1,6 +1,5 @@
 import type { Logger } from '@n8n/backend-common';
 
-import type { AgentMessageChunk, StreamChunk, ToolProgressChunk } from '../types/streaming';
 import type {
 	AssistantContext,
 	AssistantResult,
@@ -16,6 +15,7 @@ import type {
 	SdkTextMessage,
 	StreamWriter,
 } from './types';
+import type { AgentMessageChunk, StreamChunk, ToolProgressChunk } from '../types/streaming';
 
 /** Same separator used by the backend stream protocol (packages/cli/src/constants.ts:145) */
 const STREAM_SEPARATOR = '⧉⇋⇋➽⌑⧉§§\n';
@@ -54,7 +54,6 @@ export class AssistantHandler {
 	 */
 	buildSdkPayload(context: AssistantContext): { payload: object; sessionId?: string } {
 		if (context.sdkSessionId) {
-			// Continuation message
 			return {
 				payload: {
 					role: 'user' as const,
@@ -65,7 +64,6 @@ export class AssistantHandler {
 			};
 		}
 
-		// Initial message → init-support-chat
 		const initPayload: Record<string, unknown> = {
 			role: 'user' as const,
 			type: 'init-support-chat' as const,
@@ -142,10 +140,12 @@ export class AssistantHandler {
 		const decoder = new TextDecoder();
 
 		let buffer = '';
-		let sdkSessionId: string | undefined;
-		const collectedTexts: string[] = [];
-		let hasCodeDiff = false;
-		const suggestionIds: string[] = [];
+		const state = {
+			sdkSessionId: undefined as string | undefined,
+			collectedTexts: [] as string[],
+			hasCodeDiff: false,
+			suggestionIds: [] as string[],
+		};
 
 		try {
 			while (true) {
@@ -176,41 +176,14 @@ export class AssistantHandler {
 						continue;
 					}
 
-					// Track session ID from first chunk
-					if (chunk.sessionId && !sdkSessionId) {
-						sdkSessionId = chunk.sessionId;
-					}
-
-					for (const msg of chunk.messages) {
-						const mapped = this.mapSdkMessage(msg);
-						if (!mapped) continue;
-
-						// Collect text for response aggregation
-						if (mapped.type === 'message' && 'text' in mapped && mapped.text) {
-							collectedTexts.push(mapped.text);
-						}
-
-						// Track code-diffs and suggestion IDs
-						if (this.isSdkCodeDiff(msg)) {
-							hasCodeDiff = true;
-							if (msg.suggestionId) {
-								suggestionIds.push(msg.suggestionId);
-							}
-						}
-
-						if (this.isSdkAgentSuggestion(msg) && msg.suggestionId) {
-							suggestionIds.push(msg.suggestionId);
-						}
-
-						writer(mapped);
-					}
+					this.processChunkMessages(chunk, state, writer);
 				}
 			}
 		} finally {
 			reader.releaseLock();
 		}
 
-		const responseText = collectedTexts.join('\n');
+		const responseText = state.collectedTexts.join('\n');
 		const summary =
 			responseText.length > SUMMARY_MAX_LENGTH
 				? responseText.substring(0, SUMMARY_MAX_LENGTH) + '...'
@@ -219,10 +192,50 @@ export class AssistantHandler {
 		return {
 			responseText,
 			summary,
-			sdkSessionId,
-			hasCodeDiff,
-			suggestionIds,
+			sdkSessionId: state.sdkSessionId,
+			hasCodeDiff: state.hasCodeDiff,
+			suggestionIds: state.suggestionIds,
 		};
+	}
+
+	/**
+	 * Process all messages in a single SDK stream chunk, updating state and writing mapped chunks.
+	 */
+	private processChunkMessages(
+		chunk: SdkStreamChunk,
+		state: {
+			sdkSessionId: string | undefined;
+			collectedTexts: string[];
+			hasCodeDiff: boolean;
+			suggestionIds: string[];
+		},
+		writer: StreamWriter,
+	): void {
+		if (chunk.sessionId && !state.sdkSessionId) {
+			state.sdkSessionId = chunk.sessionId;
+		}
+
+		for (const msg of chunk.messages) {
+			const mapped = this.mapSdkMessage(msg);
+			if (!mapped) continue;
+
+			if (mapped.type === 'message' && 'text' in mapped && mapped.text) {
+				state.collectedTexts.push(mapped.text);
+			}
+
+			if (this.isSdkCodeDiff(msg)) {
+				state.hasCodeDiff = true;
+				if (msg.suggestionId) {
+					state.suggestionIds.push(msg.suggestionId);
+				}
+			}
+
+			if (this.isSdkAgentSuggestion(msg) && msg.suggestionId) {
+				state.suggestionIds.push(msg.suggestionId);
+			}
+
+			writer(mapped);
+		}
 	}
 
 	/**
@@ -240,7 +253,6 @@ export class AssistantHandler {
 		}
 
 		if (this.isSdkCodeDiff(msg)) {
-			// Degrade: description + fenced markdown code block
 			const text = `${msg.description}\n\n\`\`\`diff\n${msg.codeDiff}\n\`\`\``;
 			return {
 				role: 'assistant',

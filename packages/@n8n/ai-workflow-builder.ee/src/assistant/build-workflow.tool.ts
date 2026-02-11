@@ -2,8 +2,8 @@ import { z } from 'zod';
 
 /**
  * Schema-only tool definition for the `build_workflow` tool.
- * Used by `PlanningAgent` with `llm.bindTools()` — not a full LangChain tool.
- * The planning agent dispatches execution via `executeTool()`.
+ * Used by `TriageAgent` with `llm.bindTools()` — not a full LangChain tool.
+ * The triage agent dispatches execution via `executeTool()`.
  */
 export const BUILD_WORKFLOW_TOOL = {
 	name: 'build_workflow',

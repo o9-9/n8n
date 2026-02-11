@@ -43,10 +43,10 @@ jest.mock('@/code-builder', () => ({
 	})),
 }));
 
-const mockPlanningAgentRun = jest.fn();
+const mockTriageAgentRun = jest.fn();
 jest.mock('@/assistant', () => ({
-	PlanningAgent: jest.fn().mockImplementation(() => ({
-		run: mockPlanningAgentRun,
+	TriageAgent: jest.fn().mockImplementation(() => ({
+		run: mockTriageAgentRun,
 	})),
 }));
 
@@ -461,13 +461,12 @@ describe('WorkflowBuilderAgent', () => {
 		});
 	});
 
-	describe('planning agent routing', () => {
-		let planningConfig: WorkflowBuilderAgentConfig;
+	describe('triage agent routing', () => {
+		let triageConfig: WorkflowBuilderAgentConfig;
 
 		beforeEach(() => {
 			jest.clearAllMocks();
 
-			// Default session mocks
 			mockGenerateCodeBuilderThreadId.mockReturnValue('test-thread-id');
 			mockLoadCodeBuilderSession.mockResolvedValue({
 				conversationEntries: [],
@@ -475,7 +474,7 @@ describe('WorkflowBuilderAgent', () => {
 			});
 			mockSaveCodeBuilderSession.mockResolvedValue(undefined);
 
-			planningConfig = {
+			triageConfig = {
 				...config,
 				assistantHandler: mock<AssistantHandler>(),
 			};
@@ -489,13 +488,13 @@ describe('WorkflowBuilderAgent', () => {
 				messages: [{ role: 'assistant', type: 'message', text: 'Here is the answer' }],
 			};
 
-			mockPlanningAgentRun.mockImplementation(async function* () {
+			mockTriageAgentRun.mockImplementation(async function* () {
 				yield chunk1;
 				yield chunk2;
 				return { assistantSummary: 'Here is the answer', sdkSessionId: 'sdk-1' };
 			});
 
-			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const triageAgent = new WorkflowBuilderAgent(triageConfig);
 			const payload: ChatPayload = {
 				id: '123',
 				message: 'How do credentials work?',
@@ -503,24 +502,24 @@ describe('WorkflowBuilderAgent', () => {
 			};
 
 			const results: StreamOutput[] = [];
-			for await (const output of planningAgent.chat(payload, 'user-456')) {
+			for await (const output of triageAgent.chat(payload, 'user-456')) {
 				results.push(output);
 			}
 
 			expect(results).toEqual([chunk1, chunk2]);
 		});
 
-		it('should yield builder chunks from PlanningAgent for build outcome', async () => {
+		it('should yield builder chunks from TriageAgent for build outcome', async () => {
 			const builderChunk: StreamOutput = {
 				messages: [{ role: 'assistant', type: 'message', text: 'Built workflow' }],
 			};
 
-			mockPlanningAgentRun.mockImplementation(async function* () {
+			mockTriageAgentRun.mockImplementation(async function* () {
 				yield builderChunk;
 				return { buildExecuted: true };
 			});
 
-			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const triageAgent = new WorkflowBuilderAgent(triageConfig);
 			const payload: ChatPayload = {
 				id: '123',
 				message: 'Build me a Slack notification workflow',
@@ -528,11 +527,10 @@ describe('WorkflowBuilderAgent', () => {
 			};
 
 			const results: StreamOutput[] = [];
-			for await (const output of planningAgent.chat(payload, 'user-456')) {
+			for await (const output of triageAgent.chat(payload, 'user-456')) {
 				results.push(output);
 			}
 
-			// Builder chunks come directly from PlanningAgent
 			expect(results).toEqual([builderChunk]);
 		});
 
@@ -541,12 +539,12 @@ describe('WorkflowBuilderAgent', () => {
 				messages: [{ role: 'assistant', type: 'message', text: 'Here is a plan...' }],
 			};
 
-			mockPlanningAgentRun.mockImplementation(async function* () {
+			mockTriageAgentRun.mockImplementation(async function* () {
 				yield chunk;
 				return {};
 			});
 
-			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const triageAgent = new WorkflowBuilderAgent(triageConfig);
 			const payload: ChatPayload = {
 				id: '123',
 				message: 'What approach should I take?',
@@ -554,42 +552,42 @@ describe('WorkflowBuilderAgent', () => {
 			};
 
 			const results: StreamOutput[] = [];
-			for await (const output of planningAgent.chat(payload, 'user-456')) {
+			for await (const output of triageAgent.chat(payload, 'user-456')) {
 				results.push(output);
 			}
 
 			expect(results).toEqual([chunk]);
 		});
 
-		it('should pass userId to planning agent run', async () => {
+		it('should pass userId to triage agent run', async () => {
 			// eslint-disable-next-line require-yield
-			mockPlanningAgentRun.mockImplementation(async function* () {
+			mockTriageAgentRun.mockImplementation(async function* () {
 				return {};
 			});
 
-			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const triageAgent = new WorkflowBuilderAgent(triageConfig);
 			const payload: ChatPayload = {
 				id: '123',
 				message: 'Help me',
 				featureFlags: { codeBuilder: true },
 			};
 
-			for await (const _ of planningAgent.chat(payload, 'user-456')) {
+			for await (const _ of triageAgent.chat(payload, 'user-456')) {
 				// consume
 			}
 
-			expect(mockPlanningAgentRun).toHaveBeenCalledWith(
+			expect(mockTriageAgentRun).toHaveBeenCalledWith(
 				expect.objectContaining({ userId: 'user-456' }),
 			);
 		});
 
-		it('should pass abortSignal to planning agent run', async () => {
+		it('should pass abortSignal to triage agent run', async () => {
 			// eslint-disable-next-line require-yield
-			mockPlanningAgentRun.mockImplementation(async function* () {
+			mockTriageAgentRun.mockImplementation(async function* () {
 				return {};
 			});
 
-			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const triageAgent = new WorkflowBuilderAgent(triageConfig);
 			const payload: ChatPayload = {
 				id: '123',
 				message: 'Help me',
@@ -598,16 +596,16 @@ describe('WorkflowBuilderAgent', () => {
 
 			const controller = new AbortController();
 
-			for await (const _ of planningAgent.chat(payload, 'user-456', controller.signal)) {
+			for await (const _ of triageAgent.chat(payload, 'user-456', controller.signal)) {
 				// consume
 			}
 
-			expect(mockPlanningAgentRun).toHaveBeenCalledWith(
+			expect(mockTriageAgentRun).toHaveBeenCalledWith(
 				expect.objectContaining({ abortSignal: controller.signal }),
 			);
 		});
 
-		it('should load session and pass sdkSessionId + conversationHistory to planning agent', async () => {
+		it('should load session and pass sdkSessionId + conversationHistory to triage agent', async () => {
 			mockLoadCodeBuilderSession.mockResolvedValue({
 				conversationEntries: [{ type: 'build-request', message: 'previous build' }],
 				previousSummary: undefined,
@@ -615,11 +613,11 @@ describe('WorkflowBuilderAgent', () => {
 			});
 
 			// eslint-disable-next-line require-yield
-			mockPlanningAgentRun.mockImplementation(async function* () {
+			mockTriageAgentRun.mockImplementation(async function* () {
 				return { buildExecuted: true };
 			});
 
-			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const triageAgent = new WorkflowBuilderAgent(triageConfig);
 			const payload: ChatPayload = {
 				id: '123',
 				message: 'Build this',
@@ -627,11 +625,11 @@ describe('WorkflowBuilderAgent', () => {
 				workflowContext: { currentWorkflow: { id: 'wf-1' } },
 			};
 
-			for await (const _ of planningAgent.chat(payload, 'user-456')) {
+			for await (const _ of triageAgent.chat(payload, 'user-456')) {
 				// consume
 			}
 
-			expect(mockPlanningAgentRun).toHaveBeenCalledWith(
+			expect(mockTriageAgentRun).toHaveBeenCalledWith(
 				expect.objectContaining({
 					sdkSessionId: 'sdk-prev',
 					conversationHistory: expect.arrayContaining([
@@ -642,7 +640,7 @@ describe('WorkflowBuilderAgent', () => {
 		});
 
 		it('should save assistant-exchange entry for assistant outcome', async () => {
-			mockPlanningAgentRun.mockImplementation(async function* () {
+			mockTriageAgentRun.mockImplementation(async function* () {
 				yield {
 					messages: [{ role: 'assistant', type: 'message', text: 'Here is help' }],
 				} as StreamOutput;
@@ -652,7 +650,7 @@ describe('WorkflowBuilderAgent', () => {
 				};
 			});
 
-			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const triageAgent = new WorkflowBuilderAgent(triageConfig);
 			const payload: ChatPayload = {
 				id: '123',
 				message: 'How do credentials work?',
@@ -660,7 +658,7 @@ describe('WorkflowBuilderAgent', () => {
 				workflowContext: { currentWorkflow: { id: 'wf-1' } },
 			};
 
-			for await (const _ of planningAgent.chat(payload, 'user-456')) {
+			for await (const _ of triageAgent.chat(payload, 'user-456')) {
 				// consume
 			}
 
@@ -682,14 +680,14 @@ describe('WorkflowBuilderAgent', () => {
 		});
 
 		it('should save plan entry for empty outcome (direct reply)', async () => {
-			mockPlanningAgentRun.mockImplementation(async function* () {
+			mockTriageAgentRun.mockImplementation(async function* () {
 				yield {
 					messages: [{ role: 'assistant', type: 'message', text: 'Here is a plan' }],
 				} as StreamOutput;
 				return {};
 			});
 
-			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const triageAgent = new WorkflowBuilderAgent(triageConfig);
 			const payload: ChatPayload = {
 				id: '123',
 				message: 'What approach should I take?',
@@ -697,7 +695,7 @@ describe('WorkflowBuilderAgent', () => {
 				workflowContext: { currentWorkflow: { id: 'wf-1' } },
 			};
 
-			for await (const _ of planningAgent.chat(payload, 'user-456')) {
+			for await (const _ of triageAgent.chat(payload, 'user-456')) {
 				// consume
 			}
 
@@ -719,11 +717,11 @@ describe('WorkflowBuilderAgent', () => {
 
 		it('should NOT save session for build outcome', async () => {
 			// eslint-disable-next-line require-yield
-			mockPlanningAgentRun.mockImplementation(async function* () {
+			mockTriageAgentRun.mockImplementation(async function* () {
 				return { buildExecuted: true };
 			});
 
-			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const triageAgent = new WorkflowBuilderAgent(triageConfig);
 			const payload: ChatPayload = {
 				id: '123',
 				message: 'Build a workflow',
@@ -731,35 +729,33 @@ describe('WorkflowBuilderAgent', () => {
 				workflowContext: { currentWorkflow: { id: 'wf-1' } },
 			};
 
-			for await (const _ of planningAgent.chat(payload, 'user-456')) {
+			for await (const _ of triageAgent.chat(payload, 'user-456')) {
 				// consume
 			}
 
-			// Session save should NOT be called — SessionChatHandler handles it
 			expect(mockSaveCodeBuilderSession).not.toHaveBeenCalled();
 		});
 
-		it('should construct PlanningAgent with buildWorkflow function', async () => {
+		it('should construct TriageAgent with buildWorkflow function', async () => {
 			// eslint-disable-next-line require-yield
-			mockPlanningAgentRun.mockImplementation(async function* () {
+			mockTriageAgentRun.mockImplementation(async function* () {
 				return {};
 			});
 
-			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const triageAgent = new WorkflowBuilderAgent(triageConfig);
 			const payload: ChatPayload = {
 				id: '123',
 				message: 'Test',
 				featureFlags: { codeBuilder: true },
 			};
 
-			for await (const _ of planningAgent.chat(payload, 'user-456')) {
+			for await (const _ of triageAgent.chat(payload, 'user-456')) {
 				// consume
 			}
 
-			// Verify PlanningAgent was constructed with a buildWorkflow function
-			const mockedCtor = jest.requireMock<{ PlanningAgent: jest.Mock }>(
+			const mockedCtor = jest.requireMock<{ TriageAgent: jest.Mock }>(
 				'@/assistant',
-			).PlanningAgent;
+			).TriageAgent;
 			expect(mockedCtor).toHaveBeenCalledWith(
 				expect.objectContaining({
 					buildWorkflow: expect.any(Function),

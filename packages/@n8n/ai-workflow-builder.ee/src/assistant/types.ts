@@ -1,7 +1,6 @@
 import type { StreamChunk } from '../types/streaming';
 import type { SimpleWorkflow } from '../types/workflow';
 
-// Re-export for convenience
 export type { SimpleWorkflow };
 
 /**

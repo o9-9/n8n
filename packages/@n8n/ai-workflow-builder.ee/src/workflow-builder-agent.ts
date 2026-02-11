@@ -21,7 +21,7 @@ import { MAX_AI_BUILDER_PROMPT_LENGTH, MAX_MULTI_AGENT_STREAM_ITERATIONS } from 
 
 import { parsePlanDecision } from './agents/planner.agent';
 import type { AssistantHandler } from './assistant';
-import { PlanningAgent } from './assistant';
+import { TriageAgent } from './assistant';
 import { CodeWorkflowBuilder } from './code-builder';
 import {
 	type CodeBuilderSession,
@@ -260,9 +260,8 @@ export class WorkflowBuilderAgent {
 				return;
 			}
 
-			// Normal code builder flow — route through planning agent for classification
-			this.logger?.debug('Routing through planning agent', { userId });
-			yield* this.runPlanningAgent(payload, userId, abortSignal);
+			this.logger?.debug('Routing through triage agent', { userId });
+			yield* this.runTriageAgent(payload, userId, abortSignal);
 			return;
 		}
 
@@ -296,18 +295,16 @@ export class WorkflowBuilderAgent {
 		yield* codeWorkflowBuilder.chat(payload, userId ?? 'unknown', abortSignal);
 	}
 
-	private async *runPlanningAgent(
+	private async *runTriageAgent(
 		payload: ChatPayload,
 		userId: string | undefined,
 		abortSignal: AbortSignal | undefined,
 	) {
-		// If no assistant handler, fall back to direct code builder
 		if (!this.assistantHandler) {
 			yield* this.runCodeWorkflowBuilder(payload, userId, abortSignal);
 			return;
 		}
 
-		// 1. Load session (for sdkSessionId + history)
 		const workflowId = payload.workflowContext?.currentWorkflow?.id;
 		const resolvedUserId = userId ?? 'unknown';
 		let session: CodeBuilderSession | undefined;
@@ -318,15 +315,14 @@ export class WorkflowBuilderAgent {
 			session = await loadCodeBuilderSession(this.checkpointer, threadId);
 		}
 
-		const planningAgent = new PlanningAgent({
+		const triageAgent = new TriageAgent({
 			llm: this.stageLLMs.builder,
 			assistantHandler: this.assistantHandler,
 			buildWorkflow: (p, u, s) => this.runCodeWorkflowBuilder(p, u, s),
 			logger: this.logger,
 		});
 
-		// 2. Run planning agent with session context — manually iterate to capture text
-		const gen = planningAgent.run({
+		const gen = triageAgent.run({
 			payload,
 			userId: resolvedUserId,
 			abortSignal,
@@ -334,6 +330,9 @@ export class WorkflowBuilderAgent {
 			conversationHistory: session?.conversationEntries,
 		});
 
+		// collectedText is only used for the direct-reply session entry (the else
+		// branch below). It collects all text chunks for simplicity, but the value
+		// is only consumed when neither buildExecuted nor assistantSummary is set.
 		const collectedText: string[] = [];
 		let iterResult = await gen.next();
 		while (!iterResult.done) {
@@ -347,7 +346,6 @@ export class WorkflowBuilderAgent {
 		}
 		const outcome = iterResult.value;
 
-		// 3. Save session based on outcome
 		if (session && threadId) {
 			if (outcome.buildExecuted) {
 				// SessionChatHandler saves — no action needed
@@ -368,7 +366,6 @@ export class WorkflowBuilderAgent {
 				await saveCodeBuilderSession(this.checkpointer, threadId, session);
 			}
 		}
-		// All chunks (assistant + builder) already yielded by planning agent
 	}
 
 	private async *runMultiAgentSystem(

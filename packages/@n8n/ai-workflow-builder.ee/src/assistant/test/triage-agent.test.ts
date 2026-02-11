@@ -5,12 +5,8 @@ import type { ConversationEntry } from '../../code-builder/utils/code-builder-se
 import type { StreamOutput } from '../../types/streaming';
 import type { ChatPayload } from '../../workflow-builder-agent';
 import type { AssistantHandler } from '../assistant-handler';
-import { PlanningAgent } from '../planning-agent';
-import type { PlanningAgentOutcome } from '../planning-agent';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+import { TriageAgent } from '../triage-agent';
+import type { TriageAgentOutcome } from '../triage-agent';
 
 function createMockPayload(message = 'test message'): ChatPayload {
 	return {
@@ -85,8 +81,8 @@ function createMockBuildWorkflow(
  * Collect all yielded StreamOutput chunks and the final return value from the generator.
  */
 async function collectGenerator(
-	gen: AsyncGenerator<StreamOutput, PlanningAgentOutcome>,
-): Promise<{ chunks: StreamOutput[]; result: PlanningAgentOutcome }> {
+	gen: AsyncGenerator<StreamOutput, TriageAgentOutcome>,
+): Promise<{ chunks: StreamOutput[]; result: TriageAgentOutcome }> {
 	const chunks: StreamOutput[] = [];
 	let iterResult = await gen.next();
 	while (!iterResult.done) {
@@ -96,16 +92,8 @@ async function collectGenerator(
 	return { chunks, result: iterResult.value };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-describe('PlanningAgent', () => {
-	// -----------------------------------------------------------------------
-	// Test 1: LLM returns ask_assistant -> tool executes -> LLM sees result -> outcome from state
-	// -----------------------------------------------------------------------
+describe('TriageAgent', () => {
 	it('should execute ask_assistant, push ToolMessage, then derive outcome from state', async () => {
-		// First call: LLM picks ask_assistant
 		const firstResponse = new AIMessage({
 			content: '',
 			tool_calls: [
@@ -116,7 +104,6 @@ describe('PlanningAgent', () => {
 				},
 			],
 		});
-		// Second call: LLM sees the ToolMessage summary and responds with text
 		const secondResponse = new AIMessage({
 			content: 'Based on the assistant response, here is more info.',
 		});
@@ -124,7 +111,7 @@ describe('PlanningAgent', () => {
 		const llm = createMockLlm([firstResponse, secondResponse]);
 		const handler = createMockAssistantHandler();
 
-		const agent = new PlanningAgent({
+		const agent = new TriageAgent({
 			llm,
 			assistantHandler: handler,
 			buildWorkflow: createMockBuildWorkflow(),
@@ -133,13 +120,11 @@ describe('PlanningAgent', () => {
 			agent.run({ payload: createMockPayload(), userId: 'user-1' }),
 		);
 
-		// Outcome has assistantSummary because ask_assistant was called
 		expect(result.assistantSummary).toBe('Assistant says hi');
 		expect(result.sdkSessionId).toBe('sdk-sess-1');
 		expect(result.buildExecuted).toBeFalsy();
 		expect(handler.execute).toHaveBeenCalledTimes(1);
 
-		// Should have tool progress chunks (running, assistant chunk, completed) + final text
 		const toolRunning = chunks.find(
 			(c) =>
 				c.messages[0].type === 'tool' &&
@@ -163,16 +148,12 @@ describe('PlanningAgent', () => {
 		expect(toolCompleted).toBeDefined();
 		expect(textChunk).toBeDefined();
 
-		// Verify LLM was called twice (agent loop)
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
 		const boundModel = (llm.bindTools as jest.Mock).mock.results[0].value;
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
 		expect(boundModel.invoke).toHaveBeenCalledTimes(2);
 	});
 
-	// -----------------------------------------------------------------------
-	// Test 2: LLM returns build_workflow tool call (terminal) — now yields builder chunks
-	// -----------------------------------------------------------------------
 	it('should execute build_workflow, yield builder chunks, and set buildExecuted', async () => {
 		const builderChunk: StreamOutput = {
 			messages: [{ role: 'assistant', type: 'message', text: 'Built workflow' }],
@@ -191,7 +172,7 @@ describe('PlanningAgent', () => {
 		const llm = createMockLlm(response);
 		const handler = createMockAssistantHandler();
 
-		const agent = new PlanningAgent({
+		const agent = new TriageAgent({
 			llm,
 			assistantHandler: handler,
 			buildWorkflow: createMockBuildWorkflow([builderChunk]),
@@ -202,15 +183,11 @@ describe('PlanningAgent', () => {
 
 		expect(result.buildExecuted).toBe(true);
 		expect(result.assistantSummary).toBeUndefined();
-		// Builder chunks are now yielded
 		expect(chunks).toHaveLength(1);
 		expect(chunks[0]).toEqual(builderChunk);
 		expect(handler.execute).not.toHaveBeenCalled();
 	});
 
-	// -----------------------------------------------------------------------
-	// Test 3: LLM returns text-only response (no tool calls)
-	// -----------------------------------------------------------------------
 	it('should yield text as AgentMessageChunk and return outcome with no fields set', async () => {
 		const response = new AIMessage({
 			content: 'Here is a plan: first we add a trigger, then a Slack node.',
@@ -218,7 +195,7 @@ describe('PlanningAgent', () => {
 		const llm = createMockLlm(response);
 		const handler = createMockAssistantHandler();
 
-		const agent = new PlanningAgent({
+		const agent = new TriageAgent({
 			llm,
 			assistantHandler: handler,
 			buildWorkflow: createMockBuildWorkflow(),
@@ -240,15 +217,12 @@ describe('PlanningAgent', () => {
 		expect(handler.execute).not.toHaveBeenCalled();
 	});
 
-	// -----------------------------------------------------------------------
-	// Test 4: LLM returns no content and no tool calls
-	// -----------------------------------------------------------------------
 	it('should handle empty response gracefully and return empty outcome', async () => {
 		const response = new AIMessage({ content: '' });
 		const llm = createMockLlm(response);
 		const handler = createMockAssistantHandler();
 
-		const agent = new PlanningAgent({
+		const agent = new TriageAgent({
 			llm,
 			assistantHandler: handler,
 			buildWorkflow: createMockBuildWorkflow(),
@@ -259,13 +233,10 @@ describe('PlanningAgent', () => {
 
 		expect(result.buildExecuted).toBeFalsy();
 		expect(result.assistantSummary).toBeUndefined();
-		expect(chunks).toHaveLength(0); // no text to yield
+		expect(chunks).toHaveLength(0);
 		expect(handler.execute).not.toHaveBeenCalled();
 	});
 
-	// -----------------------------------------------------------------------
-	// Test 5: sdkSessionId passed through to assistant handler
-	// -----------------------------------------------------------------------
 	it('should pass sdkSessionId to assistant handler and return it', async () => {
 		const firstResponse = new AIMessage({
 			content: '',
@@ -277,7 +248,6 @@ describe('PlanningAgent', () => {
 				},
 			],
 		});
-		// LLM sees assistant summary and responds with text
 		const secondResponse = new AIMessage({
 			content: 'Got it.',
 		});
@@ -291,7 +261,7 @@ describe('PlanningAgent', () => {
 			suggestionIds: [],
 		});
 
-		const agent = new PlanningAgent({
+		const agent = new TriageAgent({
 			llm,
 			assistantHandler: handler,
 			buildWorkflow: createMockBuildWorkflow(),
@@ -304,15 +274,11 @@ describe('PlanningAgent', () => {
 			}),
 		);
 
-		// Verify the sdkSessionId was passed to the handler
 		const executeCall = (handler.execute as jest.Mock).mock.calls[0];
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
 		expect(executeCall[0].sdkSessionId).toBe('sdk-sess-prev');
 	});
 
-	// -----------------------------------------------------------------------
-	// Test 6: Unknown tool name -> ToolMessage error pushed, LLM retried -> build_workflow
-	// -----------------------------------------------------------------------
 	it('should push error ToolMessage for unknown tools and let LLM retry', async () => {
 		const firstResponse = new AIMessage({
 			content: '',
@@ -324,7 +290,6 @@ describe('PlanningAgent', () => {
 				},
 			],
 		});
-		// After seeing the error ToolMessage, LLM falls back to build_workflow
 		const secondResponse = new AIMessage({
 			content: '',
 			tool_calls: [
@@ -340,11 +305,11 @@ describe('PlanningAgent', () => {
 		const handler = createMockAssistantHandler();
 		const mockLogger = { warn: jest.fn(), debug: jest.fn() };
 
-		const agent = new PlanningAgent({
+		const agent = new TriageAgent({
 			llm,
 			assistantHandler: handler,
 			buildWorkflow: createMockBuildWorkflow(),
-			logger: mockLogger as unknown as PlanningAgent extends { logger?: infer L } ? L : never,
+			logger: mockLogger as unknown as TriageAgent extends { logger?: infer L } ? L : never,
 		});
 		const { result } = await collectGenerator(
 			agent.run({ payload: createMockPayload(), userId: 'user-1' }),
@@ -357,16 +322,12 @@ describe('PlanningAgent', () => {
 			expect.objectContaining({ toolName: 'unknown_tool' }),
 		);
 
-		// LLM was called twice (retry after unknown tool)
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
 		const boundModel = (llm.bindTools as jest.Mock).mock.results[0].value;
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
 		expect(boundModel.invoke).toHaveBeenCalledTimes(2);
 	});
 
-	// -----------------------------------------------------------------------
-	// Test 7: Conversation history included in system message
-	// -----------------------------------------------------------------------
 	it('should include conversation history in LLM system message when provided', async () => {
 		const response = new AIMessage({ content: 'Noted context.' });
 		const llm = createMockLlm(response);
@@ -377,7 +338,7 @@ describe('PlanningAgent', () => {
 			{ type: 'assistant-exchange', userQuery: 'How?', assistantSummary: 'Use Slack node' },
 		];
 
-		const agent = new PlanningAgent({
+		const agent = new TriageAgent({
 			llm,
 			assistantHandler: handler,
 			buildWorkflow: createMockBuildWorkflow(),
@@ -390,7 +351,6 @@ describe('PlanningAgent', () => {
 			}),
 		);
 
-		// Get the bound model's invoke call to inspect messages
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
 		const boundModel = (llm.bindTools as jest.Mock).mock.results[0].value;
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
@@ -406,15 +366,12 @@ describe('PlanningAgent', () => {
 		expect(systemMessage.content).toContain('[Help] Q: How?');
 	});
 
-	// -----------------------------------------------------------------------
-	// Test 8: No history section when conversationHistory is empty
-	// -----------------------------------------------------------------------
 	it('should not include conversation history section when empty', async () => {
 		const response = new AIMessage({ content: 'Reply.' });
 		const llm = createMockLlm(response);
 		const handler = createMockAssistantHandler();
 
-		const agent = new PlanningAgent({
+		const agent = new TriageAgent({
 			llm,
 			assistantHandler: handler,
 			buildWorkflow: createMockBuildWorkflow(),
@@ -438,15 +395,11 @@ describe('PlanningAgent', () => {
 		expect(systemMessage.content).not.toContain('Conversation history:');
 	});
 
-	// -----------------------------------------------------------------------
-	// Test 9: Multi-step reasoning — ask_assistant then build_workflow
-	// -----------------------------------------------------------------------
 	it('should support multi-step: ask_assistant -> see result -> build_workflow', async () => {
 		const builderChunk: StreamOutput = {
 			messages: [{ role: 'assistant', type: 'message', text: 'Built the fix' }],
 		};
 
-		// First call: LLM picks ask_assistant
 		const firstResponse = new AIMessage({
 			content: '',
 			tool_calls: [
@@ -457,7 +410,6 @@ describe('PlanningAgent', () => {
 				},
 			],
 		});
-		// Second call: LLM sees assistant summary, decides to build
 		const secondResponse = new AIMessage({
 			content: '',
 			tool_calls: [
@@ -478,7 +430,7 @@ describe('PlanningAgent', () => {
 			suggestionIds: [],
 		});
 
-		const agent = new PlanningAgent({
+		const agent = new TriageAgent({
 			llm,
 			assistantHandler: handler,
 			buildWorkflow: createMockBuildWorkflow([builderChunk]),
@@ -487,20 +439,15 @@ describe('PlanningAgent', () => {
 			agent.run({ payload: createMockPayload(), userId: 'user-1' }),
 		);
 
-		// Final outcome: build was executed
 		expect(result.buildExecuted).toBe(true);
 		expect(handler.execute).toHaveBeenCalledTimes(1);
 
-		// Builder chunks should be in the output
 		expect(chunks.some((c) => c === builderChunk)).toBe(true);
 
-		// LLM was called twice
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
 		const boundModel = (llm.bindTools as jest.Mock).mock.results[0].value;
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
 		expect(boundModel.invoke).toHaveBeenCalledTimes(2);
-
-		// Verify ToolMessage was pushed with the summary (inspect the second invoke call's messages)
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
 		const secondCallMessages = (boundModel.invoke as jest.Mock).mock.calls[1][0];
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call
@@ -513,11 +460,7 @@ describe('PlanningAgent', () => {
 		expect(toolMessage?.content).toBe('Missing credentials error');
 	});
 
-	// -----------------------------------------------------------------------
-	// Test 10: Max iterations exhausted — fallback with assistant summary
-	// -----------------------------------------------------------------------
 	it('should return outcome with assistantSummary when max iterations reached', async () => {
-		// All 10 iterations: LLM keeps calling ask_assistant (unusual but tests the limit)
 		const askResponse = new AIMessage({
 			content: '',
 			tool_calls: [
@@ -529,11 +472,10 @@ describe('PlanningAgent', () => {
 			],
 		});
 
-		// createMockLlm repeats the last response when index exceeds array length
 		const llm = createMockLlm([askResponse]);
 		const handler = createMockAssistantHandler();
 
-		const agent = new PlanningAgent({
+		const agent = new TriageAgent({
 			llm,
 			assistantHandler: handler,
 			buildWorkflow: createMockBuildWorkflow(),
@@ -542,18 +484,13 @@ describe('PlanningAgent', () => {
 			agent.run({ payload: createMockPayload(), userId: 'user-1' }),
 		);
 
-		// Should return outcome with assistantSummary since assistant was called
 		expect(result.assistantSummary).toBe('Assistant says hi');
 		expect(result.sdkSessionId).toBe('sdk-sess-1');
 		expect(result.buildExecuted).toBeFalsy();
 		expect(handler.execute).toHaveBeenCalledTimes(10);
 	});
 
-	// -----------------------------------------------------------------------
-	// Test 11: Max iterations exhausted — fallback with no state accumulated
-	// -----------------------------------------------------------------------
 	it('should return empty outcome when max iterations reached without state', async () => {
-		// All iterations: LLM keeps calling unknown tools
 		const unknownResponse = new AIMessage({
 			content: '',
 			tool_calls: [
@@ -565,31 +502,26 @@ describe('PlanningAgent', () => {
 			],
 		});
 
-		// createMockLlm repeats the last response when index exceeds array length
 		const llm = createMockLlm([unknownResponse]);
 		const handler = createMockAssistantHandler();
 		const mockLogger = { warn: jest.fn(), debug: jest.fn() };
 
-		const agent = new PlanningAgent({
+		const agent = new TriageAgent({
 			llm,
 			assistantHandler: handler,
 			buildWorkflow: createMockBuildWorkflow(),
-			logger: mockLogger as unknown as PlanningAgent extends { logger?: infer L } ? L : never,
+			logger: mockLogger as unknown as TriageAgent extends { logger?: infer L } ? L : never,
 		});
 		const { result } = await collectGenerator(
 			agent.run({ payload: createMockPayload(), userId: 'user-1' }),
 		);
 
-		// All outcome fields falsy
 		expect(result.buildExecuted).toBeFalsy();
 		expect(result.assistantSummary).toBeUndefined();
 		expect(handler.execute).not.toHaveBeenCalled();
 		expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('Max iterations reached'));
 	});
 
-	// -----------------------------------------------------------------------
-	// Test 12: Tool progress chunks yielded for ask_assistant
-	// -----------------------------------------------------------------------
 	it('should yield running and completed tool progress chunks for ask_assistant', async () => {
 		const firstResponse = new AIMessage({
 			content: '',
@@ -606,7 +538,7 @@ describe('PlanningAgent', () => {
 		const llm = createMockLlm([firstResponse, secondResponse]);
 		const handler = createMockAssistantHandler();
 
-		const agent = new PlanningAgent({
+		const agent = new TriageAgent({
 			llm,
 			assistantHandler: handler,
 			buildWorkflow: createMockBuildWorkflow(),
@@ -615,7 +547,6 @@ describe('PlanningAgent', () => {
 			agent.run({ payload: createMockPayload(), userId: 'user-1' }),
 		);
 
-		// Find tool progress chunks
 		const toolChunks = chunks.filter((c) => c.messages[0].type === 'tool');
 		expect(toolChunks.length).toBeGreaterThanOrEqual(2);
 
@@ -627,22 +558,18 @@ describe('PlanningAgent', () => {
 		expect(statuses).toContain('completed');
 	});
 
-	// -----------------------------------------------------------------------
-	// Test 13: Schema-only tools used (no placeholder tool functions)
-	// -----------------------------------------------------------------------
 	it('should bind schema-only tools to the LLM', async () => {
 		const response = new AIMessage({ content: 'Hi' });
 		const llm = createMockLlm(response);
 		const handler = createMockAssistantHandler();
 
-		const agent = new PlanningAgent({
+		const agent = new TriageAgent({
 			llm,
 			assistantHandler: handler,
 			buildWorkflow: createMockBuildWorkflow(),
 		});
 		await collectGenerator(agent.run({ payload: createMockPayload(), userId: 'user-1' }));
 
-		// Verify bindTools was called with schema-only tool definitions (not LangChain tool instances)
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
 		const bindToolsCall = (llm.bindTools as jest.Mock).mock.calls[0][0];
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
@@ -650,22 +577,85 @@ describe('PlanningAgent', () => {
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
 		expect(bindToolsCall[1].name).toBe('build_workflow');
 
-		// Schema-only tools should have a schema property and a name, but no invoke method
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
 		expect(bindToolsCall[0].schema).toBeDefined();
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
 		expect(bindToolsCall[0].invoke).toBeUndefined();
 	});
 
-	// -----------------------------------------------------------------------
-	// Test 14: Priority — buildExecuted beats assistantSummary
-	// -----------------------------------------------------------------------
+	it('should propagate errors from buildWorkflow to the consumer', async () => {
+		const response = new AIMessage({
+			content: '',
+			tool_calls: [
+				{
+					id: 'tc-err-1',
+					name: 'build_workflow',
+					args: { instructions: 'Build it' },
+				},
+			],
+		});
+
+		const llm = createMockLlm(response);
+		const handler = createMockAssistantHandler();
+		const buildError = new Error('Build failed: internal error');
+
+		const failingBuildWorkflow = (
+			_payload: ChatPayload,
+			_userId: string,
+			_abortSignal?: AbortSignal,
+		): AsyncIterable<StreamOutput> => ({
+			[Symbol.asyncIterator]: () => ({
+				async next(): Promise<IteratorResult<StreamOutput>> {
+					throw buildError;
+				},
+			}),
+		});
+
+		const agent = new TriageAgent({
+			llm,
+			assistantHandler: handler,
+			buildWorkflow: failingBuildWorkflow,
+		});
+
+		await expect(
+			collectGenerator(agent.run({ payload: createMockPayload(), userId: 'user-1' })),
+		).rejects.toThrow('Build failed: internal error');
+	});
+
+	it('should propagate errors from assistantHandler.execute() to the consumer', async () => {
+		const response = new AIMessage({
+			content: '',
+			tool_calls: [
+				{
+					id: 'tc-err-2',
+					name: 'ask_assistant',
+					args: { query: 'Help me' },
+				},
+			],
+		});
+
+		const llm = createMockLlm(response);
+		const handlerError = new Error('Assistant service unavailable');
+		const handler = {
+			execute: jest.fn().mockRejectedValue(handlerError),
+		} as unknown as AssistantHandler;
+
+		const agent = new TriageAgent({
+			llm,
+			assistantHandler: handler,
+			buildWorkflow: createMockBuildWorkflow(),
+		});
+
+		await expect(
+			collectGenerator(agent.run({ payload: createMockPayload(), userId: 'user-1' })),
+		).rejects.toThrow('Assistant service unavailable');
+	});
+
 	it('should prioritize build_workflow over ask_assistant in outcome', async () => {
 		const builderChunk: StreamOutput = {
 			messages: [{ role: 'assistant', type: 'message', text: 'Built it' }],
 		};
 
-		// ask_assistant first (sets assistantSummary), then build_workflow (sets buildExecuted)
 		const firstResponse = new AIMessage({
 			content: '',
 			tool_calls: [
@@ -690,7 +680,7 @@ describe('PlanningAgent', () => {
 		const llm = createMockLlm([firstResponse, secondResponse]);
 		const handler = createMockAssistantHandler();
 
-		const agent = new PlanningAgent({
+		const agent = new TriageAgent({
 			llm,
 			assistantHandler: handler,
 			buildWorkflow: createMockBuildWorkflow([builderChunk]),
@@ -699,7 +689,6 @@ describe('PlanningAgent', () => {
 			agent.run({ payload: createMockPayload(), userId: 'user-1' }),
 		);
 
-		// buildExecuted is set because build_workflow ran
 		expect(result.buildExecuted).toBe(true);
 		expect(handler.execute).toHaveBeenCalledTimes(1);
 	});

@@ -93,7 +93,6 @@ describe('code-builder-session', () => {
 			const checkpointer = new MemorySaver();
 			const threadId = 'legacy-thread';
 
-			// Directly write legacy checkpoint format
 			const config = { configurable: { thread_id: threadId } };
 			await checkpointer.put(
 				config,
@@ -253,7 +252,6 @@ describe('code-builder-session', () => {
 		});
 
 		it('should compact when entries exceed threshold', async () => {
-			// Create a session with 21 entries (exceeds threshold of 20)
 			const entries = Array.from({ length: 21 }, (_, i) => ({
 				type: 'build-request' as const,
 				message: `message ${i + 1}`,
@@ -264,7 +262,6 @@ describe('code-builder-session', () => {
 
 			const result = await compactSessionIfNeeded(session, fakeLLM, 20);
 
-			// Should keep only the most recent 11 entries (21 - 10 = 11)
 			expect(result.conversationEntries.length).toBe(11);
 			expect(result.conversationEntries[0]).toEqual({
 				type: 'build-request',
@@ -359,7 +356,6 @@ describe('code-builder-session', () => {
 
 			const result = await compactSessionIfNeeded(session, fakeLLM, 20);
 
-			// 21 entries, compact first 10, keep 11
 			expect(result.conversationEntries.length).toBe(11);
 			expect(result.previousSummary).toBeDefined();
 		});

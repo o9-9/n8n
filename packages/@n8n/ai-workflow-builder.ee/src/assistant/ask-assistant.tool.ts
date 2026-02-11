@@ -2,8 +2,8 @@ import { z } from 'zod';
 
 /**
  * Schema-only tool definition for the `ask_assistant` tool.
- * Used by `PlanningAgent` with `llm.bindTools()` — not a full LangChain tool.
- * The planning agent dispatches execution via `executeTool()`.
+ * Used by `TriageAgent` with `llm.bindTools()` — not a full LangChain tool.
+ * The triage agent dispatches execution via `executeTool()`.
  */
 export const ASK_ASSISTANT_TOOL = {
 	name: 'ask_assistant',
