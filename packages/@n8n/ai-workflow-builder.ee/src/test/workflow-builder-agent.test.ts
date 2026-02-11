@@ -545,14 +545,14 @@ describe('WorkflowBuilderAgent', () => {
 			expect(mockCodeWorkflowBuilderChat).toHaveBeenCalled();
 		});
 
-		it('should route to planning and yield chunk without calling CodeWorkflowBuilder', async () => {
+		it('should route to direct_reply and yield chunk without calling CodeWorkflowBuilder', async () => {
 			const chunk: StreamOutput = {
 				messages: [{ role: 'assistant', type: 'message', text: 'Here is a plan...' }],
 			};
 
 			mockPlanningAgentRun.mockImplementation(async function* () {
 				yield chunk;
-				return { route: 'planning' };
+				return { route: 'direct_reply' };
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);
@@ -574,7 +574,7 @@ describe('WorkflowBuilderAgent', () => {
 		it('should pass userId to planning agent run', async () => {
 			// eslint-disable-next-line require-yield
 			mockPlanningAgentRun.mockImplementation(async function* () {
-				return { route: 'planning' };
+				return { route: 'direct_reply' };
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);
@@ -596,7 +596,7 @@ describe('WorkflowBuilderAgent', () => {
 		it('should pass abortSignal to planning agent run', async () => {
 			// eslint-disable-next-line require-yield
 			mockPlanningAgentRun.mockImplementation(async function* () {
-				return { route: 'planning' };
+				return { route: 'direct_reply' };
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);
@@ -692,12 +692,12 @@ describe('WorkflowBuilderAgent', () => {
 			);
 		});
 
-		it('should save plan entry for planning route', async () => {
+		it('should save plan entry for direct_reply route', async () => {
 			mockPlanningAgentRun.mockImplementation(async function* () {
 				yield {
 					messages: [{ role: 'assistant', type: 'message', text: 'Here is a plan' }],
 				} as StreamOutput;
-				return { route: 'planning' };
+				return { route: 'direct_reply' };
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);

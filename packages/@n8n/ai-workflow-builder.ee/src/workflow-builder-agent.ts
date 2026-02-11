@@ -356,7 +356,7 @@ export class WorkflowBuilderAgent {
 				});
 				session.sdkSessionId = result.sdkSessionId;
 				await saveCodeBuilderSession(this.checkpointer, threadId, session);
-			} else if (result.route === 'planning') {
+			} else if (result.route === 'direct_reply') {
 				session.conversationEntries.push({
 					type: 'plan',
 					userQuery: payload.message,
@@ -370,7 +370,7 @@ export class WorkflowBuilderAgent {
 		if (result.route === 'build_workflow') {
 			yield* this.runCodeWorkflowBuilder(payload, userId, abortSignal);
 		}
-		// ask_assistant and planning: chunks already yielded by planning agent
+		// ask_assistant and direct_reply: chunks already yielded by planning agent
 	}
 
 	private async *runMultiAgentSystem(

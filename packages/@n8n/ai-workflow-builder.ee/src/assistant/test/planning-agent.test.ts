@@ -131,7 +131,7 @@ describe('PlanningAgent', () => {
 	// -----------------------------------------------------------------------
 	// Test 3: LLM returns text-only response (no tool calls)
 	// -----------------------------------------------------------------------
-	it('should yield text as AgentMessageChunk and return planning route', async () => {
+	it('should yield text as AgentMessageChunk and return direct_reply route', async () => {
 		const response = new AIMessage({
 			content: 'Here is a plan: first we add a trigger, then a Slack node.',
 		});
@@ -143,7 +143,7 @@ describe('PlanningAgent', () => {
 			agent.run({ payload: createMockPayload(), userId: 'user-1' }),
 		);
 
-		expect(result.route).toBe('planning');
+		expect(result.route).toBe('direct_reply');
 		expect(chunks).toHaveLength(1);
 		expect(chunks[0].messages[0]).toEqual(
 			expect.objectContaining({
@@ -158,7 +158,7 @@ describe('PlanningAgent', () => {
 	// -----------------------------------------------------------------------
 	// Test 4: LLM returns no content and no tool calls
 	// -----------------------------------------------------------------------
-	it('should handle empty response gracefully and return planning', async () => {
+	it('should handle empty response gracefully and return direct_reply', async () => {
 		const response = new AIMessage({ content: '' });
 		const llm = createMockLlm(response);
 		const handler = createMockAssistantHandler();
@@ -168,7 +168,7 @@ describe('PlanningAgent', () => {
 			agent.run({ payload: createMockPayload(), userId: 'user-1' }),
 		);
 
-		expect(result.route).toBe('planning');
+		expect(result.route).toBe('direct_reply');
 		expect(chunks).toHaveLength(0); // no text to yield
 		expect(handler.execute).not.toHaveBeenCalled();
 	});

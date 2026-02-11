@@ -32,7 +32,7 @@ export interface PlanningAgentParams {
 }
 
 export interface PlanningAgentResult {
-	route: 'ask_assistant' | 'build_workflow' | 'planning';
+	route: 'ask_assistant' | 'build_workflow' | 'direct_reply';
 	sdkSessionId?: string;
 	assistantSummary?: string;
 }
@@ -44,22 +44,14 @@ export interface PlanningAgentResult {
 const PLANNING_PROMPT = prompt()
 	.section(
 		'role',
-		`You are a planning agent for the n8n workflow builder.
-
-1. CLASSIFY the user's message:
-   - "question" → help, debugging, errors, credentials, "how does X work?"
-   - "build" → create or modify a workflow, add/connect nodes
-   - "plan" → discuss an approach before building
-
-2. Route:
-   - QUESTION → call ask_assistant with the user's query
-   - BUILD → call build_workflow with instructions
-   - PLAN → respond with a brief text plan. No tool call.
+		`You are a routing agent for the n8n workflow builder.
+You have tools available. Use them when appropriate, or respond directly if neither tool fits.
 
 Rules:
 - Make exactly zero or one tool call
 - Pass the user's query faithfully to ask_assistant
 - Include the full user request as instructions for build_workflow
+- If neither tool is appropriate, respond directly with helpful text
 - Use conversation history (if provided) to understand context from previous turns`,
 	)
 	.build();
@@ -71,7 +63,7 @@ Rules:
 const ASK_ASSISTANT_TOOL = tool(async () => '', {
 	name: 'ask_assistant',
 	description:
-		'Route a help, debugging, or credential question to the n8n assistant. Use this for questions about how n8n works, troubleshooting errors, or credential setup.',
+		'Ask the n8n assistant a question. Use this when the user needs help understanding n8n concepts, troubleshooting node errors, debugging workflow executions, setting up credentials, or asking "how does X work?" questions. Do NOT use this for requests to create, modify, or build workflows.',
 	schema: z.object({
 		query: z.string().describe('The user question to send to the assistant'),
 	}),
@@ -95,7 +87,7 @@ const BUILD_WORKFLOW_PLACEHOLDER = tool(async () => '', {
  * Single-step planning agent that classifies user messages and routes to either:
  * - `ask_assistant` — help/debug queries via AssistantHandler (no credits)
  * - `build_workflow` — workflow generation via CodeWorkflowBuilder (credits consumed)
- * - `planning` — direct text reply for plan discussions (no credits)
+ * - `direct_reply` — direct text reply for plan discussions (no credits)
  */
 export class PlanningAgent {
 	private readonly llm: BaseChatModel;
@@ -146,7 +138,7 @@ export class PlanningAgent {
 					text,
 				});
 			}
-			return { route: 'planning' };
+			return { route: 'direct_reply' };
 		}
 
 		const toolCall = toolCalls[0];
