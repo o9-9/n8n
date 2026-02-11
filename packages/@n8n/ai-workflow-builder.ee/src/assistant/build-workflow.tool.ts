@@ -3,7 +3,7 @@ import { z } from 'zod';
 /**
  * Schema-only tool definition for the `build_workflow` tool.
  * Used by `PlanningAgent` with `llm.bindTools()` — not a full LangChain tool.
- * The planning agent returns a routing decision; the caller handles execution.
+ * The planning agent dispatches execution via `executeTool()`.
  */
 export const BUILD_WORKFLOW_TOOL = {
 	name: 'build_workflow',

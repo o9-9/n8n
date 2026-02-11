@@ -321,6 +321,7 @@ export class WorkflowBuilderAgent {
 		const planningAgent = new PlanningAgent({
 			llm: this.stageLLMs.builder,
 			assistantHandler: this.assistantHandler,
+			buildWorkflow: (p, u, s) => this.runCodeWorkflowBuilder(p, u, s),
 			logger: this.logger,
 		});
 
@@ -344,19 +345,21 @@ export class WorkflowBuilderAgent {
 			}
 			iterResult = await gen.next();
 		}
-		const result = iterResult.value;
+		const outcome = iterResult.value;
 
-		// 3. Save session for non-build routes
+		// 3. Save session based on outcome
 		if (session && threadId) {
-			if (result.route === 'ask_assistant') {
+			if (outcome.buildExecuted) {
+				// SessionChatHandler saves — no action needed
+			} else if (outcome.assistantSummary) {
 				session.conversationEntries.push({
 					type: 'assistant-exchange',
 					userQuery: payload.message,
-					assistantSummary: result.assistantSummary ?? '',
+					assistantSummary: outcome.assistantSummary,
 				});
-				session.sdkSessionId = result.sdkSessionId;
+				session.sdkSessionId = outcome.sdkSessionId;
 				await saveCodeBuilderSession(this.checkpointer, threadId, session);
-			} else if (result.route === 'direct_reply') {
+			} else {
 				session.conversationEntries.push({
 					type: 'plan',
 					userQuery: payload.message,
@@ -364,13 +367,8 @@ export class WorkflowBuilderAgent {
 				});
 				await saveCodeBuilderSession(this.checkpointer, threadId, session);
 			}
-			// build_workflow: SessionChatHandler saves
 		}
-
-		if (result.route === 'build_workflow') {
-			yield* this.runCodeWorkflowBuilder(payload, userId, abortSignal);
-		}
-		// ask_assistant and direct_reply: chunks already yielded by planning agent
+		// All chunks (assistant + builder) already yielded by planning agent
 	}
 
 	private async *runMultiAgentSystem(

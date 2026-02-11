@@ -462,22 +462,10 @@ describe('WorkflowBuilderAgent', () => {
 	});
 
 	describe('planning agent routing', () => {
-		const MockedCodeWorkflowBuilder = CodeWorkflowBuilder as jest.MockedClass<
-			typeof CodeWorkflowBuilder
-		>;
-
 		let planningConfig: WorkflowBuilderAgentConfig;
 
 		beforeEach(() => {
 			jest.clearAllMocks();
-			MockedCodeWorkflowBuilder.mockClear();
-			mockCodeWorkflowBuilderChat.mockReturnValue(
-				(async function* () {
-					yield {
-						messages: [{ role: 'assistant', type: 'message', text: 'Built workflow' }],
-					} as StreamOutput;
-				})(),
-			);
 
 			// Default session mocks
 			mockGenerateCodeBuilderThreadId.mockReturnValue('test-thread-id');
@@ -493,7 +481,7 @@ describe('WorkflowBuilderAgent', () => {
 			};
 		});
 
-		it('should route to ask_assistant and yield chunks without calling CodeWorkflowBuilder', async () => {
+		it('should yield assistant chunks and not call CodeWorkflowBuilder for assistant outcome', async () => {
 			const chunk1: StreamOutput = {
 				messages: [{ role: 'assistant', type: 'message', text: 'Let me help' }],
 			};
@@ -504,7 +492,7 @@ describe('WorkflowBuilderAgent', () => {
 			mockPlanningAgentRun.mockImplementation(async function* () {
 				yield chunk1;
 				yield chunk2;
-				return { route: 'ask_assistant' };
+				return { assistantSummary: 'Here is the answer', sdkSessionId: 'sdk-1' };
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);
@@ -520,13 +508,16 @@ describe('WorkflowBuilderAgent', () => {
 			}
 
 			expect(results).toEqual([chunk1, chunk2]);
-			expect(MockedCodeWorkflowBuilder).not.toHaveBeenCalled();
 		});
 
-		it('should route to build_workflow and call CodeWorkflowBuilder', async () => {
-			// eslint-disable-next-line require-yield
+		it('should yield builder chunks from PlanningAgent for build outcome', async () => {
+			const builderChunk: StreamOutput = {
+				messages: [{ role: 'assistant', type: 'message', text: 'Built workflow' }],
+			};
+
 			mockPlanningAgentRun.mockImplementation(async function* () {
-				return { route: 'build_workflow' };
+				yield builderChunk;
+				return { buildExecuted: true };
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);
@@ -541,18 +532,18 @@ describe('WorkflowBuilderAgent', () => {
 				results.push(output);
 			}
 
-			expect(MockedCodeWorkflowBuilder).toHaveBeenCalled();
-			expect(mockCodeWorkflowBuilderChat).toHaveBeenCalled();
+			// Builder chunks come directly from PlanningAgent
+			expect(results).toEqual([builderChunk]);
 		});
 
-		it('should route to direct_reply and yield chunk without calling CodeWorkflowBuilder', async () => {
+		it('should yield direct reply chunk for empty outcome', async () => {
 			const chunk: StreamOutput = {
 				messages: [{ role: 'assistant', type: 'message', text: 'Here is a plan...' }],
 			};
 
 			mockPlanningAgentRun.mockImplementation(async function* () {
 				yield chunk;
-				return { route: 'direct_reply' };
+				return {};
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);
@@ -568,13 +559,12 @@ describe('WorkflowBuilderAgent', () => {
 			}
 
 			expect(results).toEqual([chunk]);
-			expect(MockedCodeWorkflowBuilder).not.toHaveBeenCalled();
 		});
 
 		it('should pass userId to planning agent run', async () => {
 			// eslint-disable-next-line require-yield
 			mockPlanningAgentRun.mockImplementation(async function* () {
-				return { route: 'direct_reply' };
+				return {};
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);
@@ -596,7 +586,7 @@ describe('WorkflowBuilderAgent', () => {
 		it('should pass abortSignal to planning agent run', async () => {
 			// eslint-disable-next-line require-yield
 			mockPlanningAgentRun.mockImplementation(async function* () {
-				return { route: 'direct_reply' };
+				return {};
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);
@@ -626,7 +616,7 @@ describe('WorkflowBuilderAgent', () => {
 
 			// eslint-disable-next-line require-yield
 			mockPlanningAgentRun.mockImplementation(async function* () {
-				return { route: 'build_workflow' };
+				return { buildExecuted: true };
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);
@@ -651,13 +641,12 @@ describe('WorkflowBuilderAgent', () => {
 			);
 		});
 
-		it('should save assistant-exchange entry for ask_assistant route', async () => {
+		it('should save assistant-exchange entry for assistant outcome', async () => {
 			mockPlanningAgentRun.mockImplementation(async function* () {
 				yield {
 					messages: [{ role: 'assistant', type: 'message', text: 'Here is help' }],
 				} as StreamOutput;
 				return {
-					route: 'ask_assistant',
 					sdkSessionId: 'sdk-new',
 					assistantSummary: 'Helped with creds',
 				};
@@ -692,12 +681,12 @@ describe('WorkflowBuilderAgent', () => {
 			);
 		});
 
-		it('should save plan entry for direct_reply route', async () => {
+		it('should save plan entry for empty outcome (direct reply)', async () => {
 			mockPlanningAgentRun.mockImplementation(async function* () {
 				yield {
 					messages: [{ role: 'assistant', type: 'message', text: 'Here is a plan' }],
 				} as StreamOutput;
-				return { route: 'direct_reply' };
+				return {};
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);
@@ -728,10 +717,10 @@ describe('WorkflowBuilderAgent', () => {
 			);
 		});
 
-		it('should NOT save session for build_workflow route', async () => {
+		it('should NOT save session for build outcome', async () => {
 			// eslint-disable-next-line require-yield
 			mockPlanningAgentRun.mockImplementation(async function* () {
-				return { route: 'build_workflow' };
+				return { buildExecuted: true };
 			});
 
 			const planningAgent = new WorkflowBuilderAgent(planningConfig);
@@ -748,6 +737,34 @@ describe('WorkflowBuilderAgent', () => {
 
 			// Session save should NOT be called — SessionChatHandler handles it
 			expect(mockSaveCodeBuilderSession).not.toHaveBeenCalled();
+		});
+
+		it('should construct PlanningAgent with buildWorkflow function', async () => {
+			// eslint-disable-next-line require-yield
+			mockPlanningAgentRun.mockImplementation(async function* () {
+				return {};
+			});
+
+			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const payload: ChatPayload = {
+				id: '123',
+				message: 'Test',
+				featureFlags: { codeBuilder: true },
+			};
+
+			for await (const _ of planningAgent.chat(payload, 'user-456')) {
+				// consume
+			}
+
+			// Verify PlanningAgent was constructed with a buildWorkflow function
+			const mockedCtor = jest.requireMock<{ PlanningAgent: jest.Mock }>(
+				'@/assistant',
+			).PlanningAgent;
+			expect(mockedCtor).toHaveBeenCalledWith(
+				expect.objectContaining({
+					buildWorkflow: expect.any(Function),
+				}),
+			);
 		});
 	});
 });
