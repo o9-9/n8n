@@ -1,0 +1,321 @@
+import type { Logger } from '@n8n/backend-common';
+
+import type { AgentMessageChunk, StreamChunk, ToolProgressChunk } from '../types/streaming';
+import type {
+	AssistantContext,
+	AssistantResult,
+	AssistantSdkClient,
+	SdkAgentSuggestionMessage,
+	SdkCodeDiffMessage,
+	SdkEndSessionEvent,
+	SdkErrorMessage,
+	SdkIntermediateStep,
+	SdkMessageResponse,
+	SdkStreamChunk,
+	SdkSummaryMessage,
+	SdkTextMessage,
+	StreamWriter,
+} from './types';
+
+/** Same separator used by the backend stream protocol (packages/cli/src/constants.ts:145) */
+const STREAM_SEPARATOR = '⧉⇋⇋➽⌑⧉§§\n';
+
+const SUMMARY_MAX_LENGTH = 200;
+
+/**
+ * Core handler for routing queries to the AI Assistant SDK.
+ * Framework-agnostic — no LangGraph imports. Can be used from both
+ * the multi-agent subgraph and the code builder planning agent.
+ */
+export class AssistantHandler {
+	constructor(
+		private readonly client: AssistantSdkClient,
+		private readonly logger?: Logger,
+	) {}
+
+	/**
+	 * Execute an assistant SDK request: build payload, call SDK, consume stream.
+	 */
+	async execute(
+		context: AssistantContext,
+		userId: string,
+		writer: StreamWriter,
+		abortSignal?: AbortSignal,
+	): Promise<AssistantResult> {
+		const payload = this.buildSdkPayload(context);
+		const response = await this.callSdk(payload, userId);
+		return await this.consumeSdkStream(response, writer, abortSignal);
+	}
+
+	/**
+	 * Build the SDK request payload from the assistant context.
+	 * First message → `init-support-chat` payload.
+	 * Continuation (has sdkSessionId) → `UserChatMessage` with sessionId.
+	 */
+	buildSdkPayload(context: AssistantContext): { payload: object; sessionId?: string } {
+		if (context.sdkSessionId) {
+			// Continuation message
+			return {
+				payload: {
+					role: 'user' as const,
+					type: 'message' as const,
+					text: context.query,
+				},
+				sessionId: context.sdkSessionId,
+			};
+		}
+
+		// Initial message → init-support-chat
+		const initPayload: Record<string, unknown> = {
+			role: 'user' as const,
+			type: 'init-support-chat' as const,
+			user: { firstName: context.userName ?? 'User' },
+			question: context.query,
+		};
+
+		if (context.workflowJSON) {
+			initPayload.workflowContext = {
+				currentWorkflow: context.workflowJSON,
+			};
+		}
+
+		if (context.errorContext) {
+			initPayload.context = {
+				...((initPayload.context as object) ?? {}),
+				activeNodeInfo: {
+					node: { name: context.errorContext.nodeName },
+					executionStatus: {
+						status: 'error',
+						error: {
+							message: context.errorContext.errorMessage,
+							description: context.errorContext.errorDescription,
+						},
+					},
+				},
+			};
+		}
+
+		if (context.credentialContext) {
+			initPayload.context = {
+				...((initPayload.context as object) ?? {}),
+				activeCredentials: {
+					name: context.credentialContext.credentialType,
+					displayName: context.credentialContext.displayName,
+				},
+			};
+		}
+
+		return { payload: initPayload };
+	}
+
+	/**
+	 * Call the SDK and validate the response.
+	 */
+	private async callSdk(
+		payload: { payload: object; sessionId?: string },
+		userId: string,
+	): Promise<Response> {
+		const response = await this.client.chat(payload, { id: userId });
+
+		if (!response.ok) {
+			throw new Error(`Assistant SDK returned HTTP ${String(response.status)}`);
+		}
+
+		return response;
+	}
+
+	/**
+	 * Consume the SDK's streaming response, mapping messages and writing chunks.
+	 * Follows the same approach as the frontend streamRequest() utility.
+	 */
+	private async consumeSdkStream(
+		response: Response,
+		writer: StreamWriter,
+		signal?: AbortSignal,
+	): Promise<AssistantResult> {
+		const body = response.body;
+		if (!body) {
+			throw new Error('Assistant SDK response has no body');
+		}
+
+		const reader = (body as ReadableStream<Uint8Array>).getReader();
+		const decoder = new TextDecoder();
+
+		let buffer = '';
+		let sdkSessionId: string | undefined;
+		const collectedTexts: string[] = [];
+		let hasCodeDiff = false;
+		const suggestionIds: string[] = [];
+
+		try {
+			while (true) {
+				if (signal?.aborted) {
+					break;
+				}
+
+				const { done, value } = await reader.read();
+				if (done) break;
+
+				buffer += decoder.decode(value, { stream: true });
+				const segments = buffer.split(STREAM_SEPARATOR);
+
+				// Last segment may be incomplete — keep in buffer
+				buffer = segments.pop() ?? '';
+
+				for (const segment of segments) {
+					const trimmed = segment.trim();
+					if (!trimmed) continue;
+
+					let chunk: SdkStreamChunk;
+					try {
+						chunk = JSON.parse(trimmed) as SdkStreamChunk;
+					} catch {
+						this.logger?.warn('[AssistantHandler] Failed to parse SDK stream segment', {
+							segment: trimmed.substring(0, 100),
+						});
+						continue;
+					}
+
+					// Track session ID from first chunk
+					if (chunk.sessionId && !sdkSessionId) {
+						sdkSessionId = chunk.sessionId;
+					}
+
+					for (const msg of chunk.messages) {
+						const mapped = this.mapSdkMessage(msg);
+						if (!mapped) continue;
+
+						// Collect text for response aggregation
+						if (mapped.type === 'message' && 'text' in mapped && mapped.text) {
+							collectedTexts.push(mapped.text);
+						}
+
+						// Track code-diffs and suggestion IDs
+						if (this.isSdkCodeDiff(msg)) {
+							hasCodeDiff = true;
+							if (msg.suggestionId) {
+								suggestionIds.push(msg.suggestionId);
+							}
+						}
+
+						if (this.isSdkAgentSuggestion(msg) && msg.suggestionId) {
+							suggestionIds.push(msg.suggestionId);
+						}
+
+						writer(mapped);
+					}
+				}
+			}
+		} finally {
+			reader.releaseLock();
+		}
+
+		const responseText = collectedTexts.join('\n');
+		const summary =
+			responseText.length > SUMMARY_MAX_LENGTH
+				? responseText.substring(0, SUMMARY_MAX_LENGTH) + '...'
+				: responseText;
+
+		return {
+			responseText,
+			summary,
+			sdkSessionId,
+			hasCodeDiff,
+			suggestionIds,
+		};
+	}
+
+	/**
+	 * Map an SDK message to a builder StreamChunk type.
+	 * Phase 0 graceful degradation: only emits types the builder frontend already renders.
+	 */
+	private mapSdkMessage(msg: SdkMessageResponse): StreamChunk | null {
+		if (this.isSdkText(msg)) {
+			if (!msg.text) return null;
+			return {
+				role: 'assistant',
+				type: 'message',
+				text: msg.text,
+			} satisfies AgentMessageChunk;
+		}
+
+		if (this.isSdkCodeDiff(msg)) {
+			// Degrade: description + fenced markdown code block
+			const text = `${msg.description}\n\n\`\`\`diff\n${msg.codeDiff}\n\`\`\``;
+			return {
+				role: 'assistant',
+				type: 'message',
+				text,
+			} satisfies AgentMessageChunk;
+		}
+
+		if (this.isSdkSummary(msg)) {
+			return {
+				role: 'assistant',
+				type: 'message',
+				text: `**${msg.title}**\n\n${msg.content}`,
+			} satisfies AgentMessageChunk;
+		}
+
+		if (this.isSdkAgentSuggestion(msg)) {
+			return {
+				role: 'assistant',
+				type: 'message',
+				text: `**${msg.title}**\n\n${msg.text}`,
+			} satisfies AgentMessageChunk;
+		}
+
+		if (this.isSdkIntermediateStep(msg)) {
+			return {
+				type: 'tool',
+				toolName: 'assistant',
+				status: msg.text,
+			} satisfies ToolProgressChunk;
+		}
+
+		if (this.isSdkEvent(msg)) {
+			// Silently consumed — end-session, session-timeout
+			return null;
+		}
+
+		if (this.isSdkError(msg)) {
+			return {
+				role: 'assistant',
+				type: 'message',
+				text: msg.text,
+			} satisfies AgentMessageChunk;
+		}
+
+		return null;
+	}
+
+	// -- Type guards ----------------------------------------------------------
+
+	private isSdkText(msg: SdkMessageResponse): msg is SdkTextMessage {
+		return msg.type === 'message' && 'text' in msg;
+	}
+
+	private isSdkCodeDiff(msg: SdkMessageResponse): msg is SdkCodeDiffMessage {
+		return msg.type === 'code-diff' && 'codeDiff' in msg;
+	}
+
+	private isSdkSummary(msg: SdkMessageResponse): msg is SdkSummaryMessage {
+		return msg.type === 'summary' && 'title' in msg;
+	}
+
+	private isSdkAgentSuggestion(msg: SdkMessageResponse): msg is SdkAgentSuggestionMessage {
+		return msg.type === 'agent-suggestion' && 'title' in msg;
+	}
+
+	private isSdkIntermediateStep(msg: SdkMessageResponse): msg is SdkIntermediateStep {
+		return msg.type === 'intermediate-step';
+	}
+
+	private isSdkEvent(msg: SdkMessageResponse): msg is SdkEndSessionEvent {
+		return msg.type === 'event';
+	}
+
+	private isSdkError(msg: SdkMessageResponse): msg is SdkErrorMessage {
+		return msg.type === 'error' && 'text' in msg;
+	}
+}
