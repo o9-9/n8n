@@ -20,6 +20,8 @@ import {
 import { MAX_AI_BUILDER_PROMPT_LENGTH, MAX_MULTI_AGENT_STREAM_ITERATIONS } from '@/constants';
 
 import { parsePlanDecision } from './agents/planner.agent';
+import type { AssistantHandler } from './assistant';
+import { PlanningAgent } from './assistant';
 import { CodeWorkflowBuilder } from './code-builder';
 import { ValidationError } from './errors';
 import { createMultiAgentWorkflowWithSubgraphs } from './multi-agent-workflow-subgraphs';
@@ -83,6 +85,8 @@ export interface WorkflowBuilderAgentConfig {
 	resourceLocatorCallback?: ResourceLocatorCallback;
 	/** Callback for emitting telemetry events */
 	onTelemetryEvent?: (event: string, properties: ITelemetryTrackProperties) => void;
+	/** Assistant handler for routing help/debug queries via the SDK (code builder only) */
+	assistantHandler?: AssistantHandler;
 }
 
 export interface ExpressionValue {
@@ -146,6 +150,7 @@ export class WorkflowBuilderAgent {
 	private nodeDefinitionDirs?: string[];
 	private resourceLocatorCallback?: ResourceLocatorCallback;
 	private onTelemetryEvent?: (event: string, properties: ITelemetryTrackProperties) => void;
+	private assistantHandler?: AssistantHandler;
 	/** Feature flags stored from the first chat call to ensure consistency across a session */
 	private sessionFeatureFlags?: BuilderFeatureFlags;
 
@@ -161,6 +166,7 @@ export class WorkflowBuilderAgent {
 		this.nodeDefinitionDirs = config.nodeDefinitionDirs;
 		this.resourceLocatorCallback = config.resourceLocatorCallback;
 		this.onTelemetryEvent = config.onTelemetryEvent;
+		this.assistantHandler = config.assistantHandler;
 	}
 
 	/**
@@ -248,9 +254,9 @@ export class WorkflowBuilderAgent {
 				return;
 			}
 
-			// Normal code builder flow (no plan mode)
-			this.logger?.debug('Routing to CodeWorkflowBuilder', { userId });
-			yield* this.runCodeWorkflowBuilder(payload, userId, abortSignal);
+			// Normal code builder flow — route through planning agent for classification
+			this.logger?.debug('Routing through planning agent', { userId });
+			yield* this.runPlanningAgent(payload, userId, abortSignal);
 			return;
 		}
 
@@ -282,6 +288,36 @@ export class WorkflowBuilderAgent {
 		});
 
 		yield* codeWorkflowBuilder.chat(payload, userId ?? 'unknown', abortSignal);
+	}
+
+	private async *runPlanningAgent(
+		payload: ChatPayload,
+		userId: string | undefined,
+		abortSignal: AbortSignal | undefined,
+	) {
+		// If no assistant handler, fall back to direct code builder
+		if (!this.assistantHandler) {
+			yield* this.runCodeWorkflowBuilder(payload, userId, abortSignal);
+			return;
+		}
+
+		const planningAgent = new PlanningAgent({
+			llm: this.stageLLMs.builder,
+			assistantHandler: this.assistantHandler,
+			logger: this.logger,
+		});
+
+		const result = yield* planningAgent.run({
+			payload,
+			userId: userId ?? 'unknown',
+			abortSignal,
+			sdkSessionId: undefined, // TODO Task 0.4: load from session
+		});
+
+		if (result.route === 'build_workflow') {
+			yield* this.runCodeWorkflowBuilder(payload, userId, abortSignal);
+		}
+		// ask_assistant and text_response: chunks already yielded by planning agent
 	}
 
 	private async *runMultiAgentSystem(

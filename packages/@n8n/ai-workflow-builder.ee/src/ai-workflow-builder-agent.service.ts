@@ -10,6 +10,7 @@ import { Client as TracingClient } from 'langsmith';
 import type { IUser, INodeTypeDescription, ITelemetryTrackProperties } from 'n8n-workflow';
 import { z } from 'zod';
 
+import { AssistantHandler } from '@/assistant';
 import { LLMServiceError } from '@/errors';
 import { anthropicClaudeSonnet45 } from '@/llm-config';
 import { SessionManagerService } from '@/session-manager.service';
@@ -192,6 +193,11 @@ export class AiWorkflowBuilderService {
 		// Create resource locator callback scoped to this user if factory is provided
 		const resourceLocatorCallback = this.resourceLocatorCallbackFactory?.(user.id);
 
+		// Create assistant handler for routing help/debug queries via the SDK
+		const assistantHandler = this.client
+			? new AssistantHandler(this.client, this.logger)
+			: undefined;
+
 		const agent = new WorkflowBuilderAgent({
 			parsedNodeTypes: this.nodeTypes,
 			// Use the same model for all stages
@@ -222,6 +228,7 @@ export class AiWorkflowBuilderService {
 			nodeDefinitionDirs: this.nodeDefinitionDirs,
 			resourceLocatorCallback,
 			onTelemetryEvent: this.onTelemetryEvent,
+			assistantHandler,
 		});
 
 		return { agent };

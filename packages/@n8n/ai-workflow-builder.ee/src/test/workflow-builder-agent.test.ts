@@ -43,6 +43,13 @@ jest.mock('@/code-builder', () => ({
 	})),
 }));
 
+const mockPlanningAgentRun = jest.fn();
+jest.mock('@/assistant', () => ({
+	PlanningAgent: jest.fn().mockImplementation(() => ({
+		run: mockPlanningAgentRun,
+	})),
+}));
+
 const mockRandomUUID = jest.fn();
 Object.defineProperty(global, 'crypto', {
 	value: {
@@ -51,6 +58,7 @@ Object.defineProperty(global, 'crypto', {
 	writable: true,
 });
 
+import type { AssistantHandler } from '@/assistant/assistant-handler';
 import { CodeWorkflowBuilder } from '@/code-builder';
 import { MAX_AI_BUILDER_PROMPT_LENGTH } from '@/constants';
 import { ValidationError } from '@/errors';
@@ -420,7 +428,7 @@ describe('WorkflowBuilderAgent', () => {
 			expect(MockedCodeWorkflowBuilder).not.toHaveBeenCalled();
 		});
 
-		it('should route to CodeWorkflowBuilder without plan when codeBuilder enabled but no planMode', async () => {
+		it('should fall back to CodeWorkflowBuilder when no assistantHandler provided', async () => {
 			const payload: ChatPayload = {
 				id: '123',
 				message: 'Create a simple workflow',
@@ -437,6 +445,155 @@ describe('WorkflowBuilderAgent', () => {
 				expect.not.objectContaining({ planOutput: expect.anything() }),
 				expect.any(String),
 				undefined,
+			);
+		});
+	});
+
+	describe('planning agent routing', () => {
+		const MockedCodeWorkflowBuilder = CodeWorkflowBuilder as jest.MockedClass<
+			typeof CodeWorkflowBuilder
+		>;
+
+		let planningConfig: WorkflowBuilderAgentConfig;
+
+		beforeEach(() => {
+			jest.clearAllMocks();
+			MockedCodeWorkflowBuilder.mockClear();
+			mockCodeWorkflowBuilderChat.mockReturnValue(
+				(async function* () {
+					yield {
+						messages: [{ role: 'assistant', type: 'message', text: 'Built workflow' }],
+					} as StreamOutput;
+				})(),
+			);
+
+			planningConfig = {
+				...config,
+				assistantHandler: mock<AssistantHandler>(),
+			};
+		});
+
+		it('should route to ask_assistant and yield chunks without calling CodeWorkflowBuilder', async () => {
+			const chunk1: StreamOutput = {
+				messages: [{ role: 'assistant', type: 'message', text: 'Let me help' }],
+			};
+			const chunk2: StreamOutput = {
+				messages: [{ role: 'assistant', type: 'message', text: 'Here is the answer' }],
+			};
+
+			mockPlanningAgentRun.mockImplementation(async function* () {
+				yield chunk1;
+				yield chunk2;
+				return { route: 'ask_assistant' };
+			});
+
+			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const payload: ChatPayload = {
+				id: '123',
+				message: 'How do credentials work?',
+				featureFlags: { codeBuilder: true },
+			};
+
+			const results: StreamOutput[] = [];
+			for await (const output of planningAgent.chat(payload, 'user-456')) {
+				results.push(output);
+			}
+
+			expect(results).toEqual([chunk1, chunk2]);
+			expect(MockedCodeWorkflowBuilder).not.toHaveBeenCalled();
+		});
+
+		it('should route to build_workflow and call CodeWorkflowBuilder', async () => {
+			// eslint-disable-next-line require-yield
+			mockPlanningAgentRun.mockImplementation(async function* () {
+				return { route: 'build_workflow' };
+			});
+
+			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const payload: ChatPayload = {
+				id: '123',
+				message: 'Build me a Slack notification workflow',
+				featureFlags: { codeBuilder: true },
+			};
+
+			const results: StreamOutput[] = [];
+			for await (const output of planningAgent.chat(payload, 'user-456')) {
+				results.push(output);
+			}
+
+			expect(MockedCodeWorkflowBuilder).toHaveBeenCalled();
+			expect(mockCodeWorkflowBuilderChat).toHaveBeenCalled();
+		});
+
+		it('should route to text_response and yield chunk without calling CodeWorkflowBuilder', async () => {
+			const chunk: StreamOutput = {
+				messages: [{ role: 'assistant', type: 'message', text: 'Here is a plan...' }],
+			};
+
+			mockPlanningAgentRun.mockImplementation(async function* () {
+				yield chunk;
+				return { route: 'text_response' };
+			});
+
+			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const payload: ChatPayload = {
+				id: '123',
+				message: 'What approach should I take?',
+				featureFlags: { codeBuilder: true },
+			};
+
+			const results: StreamOutput[] = [];
+			for await (const output of planningAgent.chat(payload, 'user-456')) {
+				results.push(output);
+			}
+
+			expect(results).toEqual([chunk]);
+			expect(MockedCodeWorkflowBuilder).not.toHaveBeenCalled();
+		});
+
+		it('should pass userId to planning agent run', async () => {
+			// eslint-disable-next-line require-yield
+			mockPlanningAgentRun.mockImplementation(async function* () {
+				return { route: 'text_response' };
+			});
+
+			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const payload: ChatPayload = {
+				id: '123',
+				message: 'Help me',
+				featureFlags: { codeBuilder: true },
+			};
+
+			for await (const _ of planningAgent.chat(payload, 'user-456')) {
+				// consume
+			}
+
+			expect(mockPlanningAgentRun).toHaveBeenCalledWith(
+				expect.objectContaining({ userId: 'user-456' }),
+			);
+		});
+
+		it('should pass abortSignal to planning agent run', async () => {
+			// eslint-disable-next-line require-yield
+			mockPlanningAgentRun.mockImplementation(async function* () {
+				return { route: 'text_response' };
+			});
+
+			const planningAgent = new WorkflowBuilderAgent(planningConfig);
+			const payload: ChatPayload = {
+				id: '123',
+				message: 'Help me',
+				featureFlags: { codeBuilder: true },
+			};
+
+			const controller = new AbortController();
+
+			for await (const _ of planningAgent.chat(payload, 'user-456', controller.signal)) {
+				// consume
+			}
+
+			expect(mockPlanningAgentRun).toHaveBeenCalledWith(
+				expect.objectContaining({ abortSignal: controller.signal }),
 			);
 		});
 	});
