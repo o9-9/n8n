@@ -189,6 +189,7 @@ export class WorkflowBuilderAgent {
 			featureFlags,
 			onGenerationSuccess: this.onGenerationSuccess,
 			resourceLocatorCallback: this.resourceLocatorCallback,
+			assistantHandler: this.assistantHandler,
 		});
 	}
 
@@ -421,6 +422,7 @@ export class WorkflowBuilderAgent {
 		const threadConfig: RunnableConfig = {
 			configurable: {
 				thread_id: threadId,
+				userId,
 			},
 		};
 

@@ -36,7 +36,9 @@ const systemPrompt = ChatPromptTemplate.fromMessages([
  */
 export const supervisorRoutingSchema = z.object({
 	reasoning: z.string().describe('One sentence explaining why this agent should act next'),
-	next: z.enum(['responder', 'discovery', 'builder']).describe('The next agent to call'),
+	next: z
+		.enum(['responder', 'discovery', 'builder', 'assistant'])
+		.describe('The next agent to call'),
 });
 
 export type SupervisorRouting = z.infer<typeof supervisorRoutingSchema>;

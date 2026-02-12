@@ -1,4 +1,5 @@
-import { HumanMessage } from '@langchain/core/messages';
+import { dispatchCustomEvent } from '@langchain/core/callbacks/dispatch';
+import { AIMessage, HumanMessage } from '@langchain/core/messages';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import { StateGraph, END, START, type MemorySaver, isGraphInterrupt } from '@langchain/langgraph';
 import type { Logger } from '@n8n/backend-common';
@@ -10,6 +11,7 @@ import {
 	type ResponderAgentType,
 } from './agents/responder.agent';
 import { SupervisorAgent } from './agents/supervisor.agent';
+import type { AssistantHandler } from './assistant';
 import {
 	DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS,
 	MAX_BUILDER_ITERATIONS,
@@ -22,11 +24,13 @@ import type { BaseSubgraph } from './subgraphs/subgraph-interface';
 import type { ResourceLocatorCallback } from './types/callbacks';
 import type { SubgraphPhase } from './types/coordination';
 import {
+	createAssistantMetadata,
 	createErrorMetadata,
 	createResponderMetadata,
 	isSubgraphPhase,
 } from './types/coordination';
-import { getNextPhaseFromLog, hasErrorInLog } from './utils/coordination-log';
+import type { StreamChunk } from './types/streaming';
+import { getNextPhaseFromLog, hasBuilderPhaseInLog, hasErrorInLog } from './utils/coordination-log';
 import { sanitizeLlmErrorMessage } from './utils/error-sanitizer';
 import { processOperations } from './utils/operations-processor';
 import {
@@ -37,6 +41,7 @@ import {
 	handleCreateWorkflowName,
 	handleDeleteMessages,
 } from './utils/state-modifier';
+import { extractUserRequest } from './utils/subgraph-helpers';
 import type { BuilderFeatureFlags, StageLLMs } from './workflow-builder-agent';
 
 /**
@@ -65,6 +70,7 @@ function routeToNode(next: string): string {
 		responder: 'responder',
 		discovery: 'discovery_subgraph',
 		builder: 'builder_subgraph',
+		assistant: 'assistant_subgraph',
 	};
 	return nodeMapping[next] ?? 'responder';
 }
@@ -83,6 +89,8 @@ export interface MultiAgentSubgraphConfig {
 	onGenerationSuccess?: () => Promise<void>;
 	/** Callback for fetching resource locator options */
 	resourceLocatorCallback?: ResourceLocatorCallback;
+	/** Assistant handler for routing help/debug queries via the SDK */
+	assistantHandler?: AssistantHandler;
 }
 
 /**
@@ -199,6 +207,7 @@ export function createMultiAgentWorkflowWithSubgraphs(config: MultiAgentSubgraph
 		featureFlags,
 		onGenerationSuccess,
 		resourceLocatorCallback,
+		assistantHandler,
 	} = config;
 
 	const supervisorAgent = new SupervisorAgent({ llm: stageLLMs.supervisor });
@@ -259,6 +268,23 @@ export function createMultiAgentWorkflowWithSubgraphs(config: MultiAgentSubgraph
 				// Record start time for timing metrics
 				const startTimestamp = Date.now();
 
+				const hasAssistantPhase = state.coordinationLog.some(
+					(e) => e.phase === 'assistant' && e.status === 'completed',
+				);
+				if (hasAssistantPhase && !hasBuilderPhaseInLog(state.coordinationLog)) {
+					return {
+						coordinationLog: [
+							{
+								phase: 'responder' as const,
+								status: 'completed' as const,
+								timestamp: Date.now(),
+								summary: 'Assistant response forwarded (no credits consumed)',
+								metadata: createResponderMetadata({ responseLength: 0 }),
+							},
+						],
+					};
+				}
+
 				const { response, introspectionEvents } = await invokeResponderAgent(
 					responderAgent,
 					{
@@ -273,8 +299,11 @@ export function createMultiAgentWorkflowWithSubgraphs(config: MultiAgentSubgraph
 					{ enableIntrospection: featureFlags?.enableIntrospection },
 				);
 
-				// Call success callback only when generation completed without errors
-				if (onGenerationSuccess && !hasErrorInLog(state.coordinationLog)) {
+				if (
+					onGenerationSuccess &&
+					!hasErrorInLog(state.coordinationLog) &&
+					hasBuilderPhaseInLog(state.coordinationLog)
+				) {
 					void Promise.resolve(onGenerationSuccess()).catch((error) => {
 						logger?.warn('Failed to execute onGenerationSuccess callback', { error });
 					});
@@ -395,10 +424,116 @@ export function createMultiAgentWorkflowWithSubgraphs(config: MultiAgentSubgraph
 					MAX_BUILDER_ITERATIONS,
 				),
 			)
-			// Connect all subgraphs to process_operations
+			.addNode('assistant_subgraph', async (state, nodeConfig) => {
+				const startTimestamp = Date.now();
+				const query = extractUserRequest(state.messages);
+				const userId = (nodeConfig?.configurable?.userId as string) ?? 'unknown';
+
+				if (!assistantHandler) {
+					logger?.warn(
+						'[assistant_subgraph] No assistant handler available, falling back to responder',
+					);
+					return {
+						nextPhase: 'responder',
+						coordinationLog: [
+							{
+								phase: 'assistant' as const,
+								status: 'error' as const,
+								timestamp: Date.now(),
+								summary: 'Assistant handler not available',
+								metadata: createErrorMetadata({
+									failedSubgraph: 'assistant',
+									errorMessage: 'Assistant handler not configured',
+								}),
+							},
+						],
+					};
+				}
+
+				try {
+					const writer = (chunk: StreamChunk) => {
+						if (nodeConfig) {
+							void dispatchCustomEvent('assistant_chunk', chunk, nodeConfig);
+						}
+					};
+
+					const result = await assistantHandler.execute(
+						{
+							query,
+							workflowJSON: state.workflowJSON,
+							sdkSessionId: state.sdkSessionId,
+						},
+						userId,
+						writer,
+					);
+
+					return {
+						messages: [new AIMessage({ content: result.responseText })],
+						sdkSessionId: result.sdkSessionId,
+						coordinationLog: [
+							{
+								phase: 'assistant' as const,
+								status: 'in_progress' as const,
+								timestamp: startTimestamp,
+								summary: 'Starting assistant',
+								metadata: createAssistantMetadata({
+									hasCodeDiff: false,
+									suggestionCount: 0,
+								}),
+							},
+							{
+								phase: 'assistant' as const,
+								status: 'completed' as const,
+								timestamp: Date.now(),
+								summary: result.summary,
+								output: result.responseText,
+								metadata: createAssistantMetadata({
+									hasCodeDiff: result.hasCodeDiff,
+									suggestionCount: result.suggestionIds.length,
+								}),
+							},
+						],
+					};
+				} catch (error) {
+					logger?.error('[assistant_subgraph] ERROR:', { error });
+					const userFacingMessage = sanitizeLlmErrorMessage(error);
+					return {
+						nextPhase: 'responder',
+						messages: [
+							new HumanMessage({
+								content: `Error in assistant: ${userFacingMessage}`,
+								name: 'system_error',
+							}),
+						],
+						coordinationLog: [
+							{
+								phase: 'assistant' as const,
+								status: 'in_progress' as const,
+								timestamp: startTimestamp,
+								summary: 'Starting assistant',
+								metadata: createAssistantMetadata({
+									hasCodeDiff: false,
+									suggestionCount: 0,
+								}),
+							},
+							{
+								phase: 'assistant' as const,
+								status: 'error' as const,
+								timestamp: Date.now(),
+								summary: `Error: ${userFacingMessage}`,
+								metadata: createErrorMetadata({
+									failedSubgraph: 'assistant',
+									errorMessage: error instanceof Error ? error.message : String(error),
+								}),
+							},
+						],
+					};
+				}
+			})
 			.addEdge('discovery_subgraph', 'process_operations')
 			.addEdge('builder_subgraph', 'process_operations')
 			.addEdge('process_operations', 'route_next_phase')
+			.addEdge('assistant_subgraph', 'route_next_phase')
 			// Start flows to check_state (preprocessing)
 			.addEdge(START, 'check_state')
 			// Conditional routing from check_state

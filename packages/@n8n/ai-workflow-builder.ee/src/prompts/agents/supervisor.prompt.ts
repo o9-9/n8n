@@ -12,13 +12,18 @@ const SUPERVISOR_ROLE = 'You are a Supervisor that routes user requests to speci
 
 const AVAILABLE_AGENTS = `- discovery: Find n8n nodes for building/modifying workflows
 - builder: Create nodes and connections (requires discovery first for new node types) and sets parameters on nodes
+- assistant: Help with errors, credential setup, debugging, and general n8n questions
 - responder: Answer questions, confirm completion (TERMINAL)`;
 
-const ROUTING_DECISION_TREE = `1. Is user asking a question or chatting? → responder
+const ROUTING_DECISION_TREE = `1. Is user asking for help with errors, credentials, debugging, or n8n concepts? → assistant
+   Examples: "why is this node failing?", "how do I set up Gmail credentials?", "what does this error mean?", "how does the HTTP Request node work?", "help me debug this"
+   Examples with selected nodes: "why is this failing?", "help me fix this error"
+
+2. Is user asking a conversational question or chatting? → responder
    Examples: "what does this do?", "explain the workflow", "thanks"
    Examples with selected nodes: "what does this node do?", "explain how it works"
 
-2. Does the request involve NEW or DIFFERENT node types? → discovery
+3. Does the request involve NEW or DIFFERENT node types? → discovery
    Examples:
    - "Build a workflow that..." (new workflow)
    - "Use [ServiceB] instead of [ServiceA]" (replacing node type)
@@ -26,11 +31,11 @@ const ROUTING_DECISION_TREE = `1. Is user asking a question or chatting? → res
    - "Switch from [ServiceA] to [ServiceB]" (swapping services)
    - "Add something before/after this" (needs discovery to find what to add)
 
-3. Is the request about connecting/disconnecting existing nodes? → builder
+4. Is the request about connecting/disconnecting existing nodes? → builder
    Examples: "Connect node A to node B", "Remove the connection to X"
    Examples with selected nodes: "connect this to X", "disconnect this", "add X before/after this" (after discovery)
 
-4. Is the request about changing VALUES in existing nodes? → builder
+5. Is the request about changing VALUES in existing nodes? → builder
    Examples:
    - "Change the URL to https://..."
    - "Set the timeout to 30 seconds"
@@ -38,7 +43,10 @@ const ROUTING_DECISION_TREE = `1. Is user asking a question or chatting? → res
    Examples with selected nodes: "change this", "update this", "fix this", "configure this"`;
 
 /** Clarifies replacement (discovery) vs configuration - common confusion point */
-const KEY_DISTINCTION = `- "Use [ServiceB] instead of [ServiceA]" = REPLACEMENT = discovery (new node type needed)
+const KEY_DISTINCTION = `- "Why is this node failing?" = ERROR DEBUG = assistant (needs SDK troubleshooting)
+- "What does this workflow do?" = EXPLANATION = responder (generates explanation from context)
+- "How do I set up OAuth?" = CREDENTIAL HELP = assistant (SDK has credential documentation)
+- "Use [ServiceB] instead of [ServiceA]" = REPLACEMENT = discovery (new node type needed)
 - "Change the [ServiceA] API key" = CONFIGURATION = builder (same node, different value)`;
 
 /** Deictic resolution rules for references like "this", "it", "these" */
