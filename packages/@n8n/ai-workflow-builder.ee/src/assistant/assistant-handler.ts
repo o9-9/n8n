@@ -1,5 +1,3 @@
-import type { Logger } from '@n8n/backend-common';
-
 import type {
 	AssistantContext,
 	AssistantResult,
@@ -28,10 +26,7 @@ const SUMMARY_MAX_LENGTH = 200;
  * the multi-agent subgraph and the code builder planning agent.
  */
 export class AssistantHandler {
-	constructor(
-		private readonly client: AssistantSdkClient,
-		private readonly logger?: Logger,
-	) {}
+	constructor(private readonly client: AssistantSdkClient) {}
 
 	/**
 	 * Execute an assistant SDK request: build payload, call SDK, consume stream.
@@ -170,9 +165,6 @@ export class AssistantHandler {
 					try {
 						chunk = JSON.parse(trimmed) as SdkStreamChunk;
 					} catch {
-						this.logger?.warn('[AssistantHandler] Failed to parse SDK stream segment', {
-							segment: trimmed.substring(0, 100),
-						});
 						continue;
 					}
 
@@ -181,6 +173,18 @@ export class AssistantHandler {
 			}
 		} finally {
 			reader.releaseLock();
+		}
+
+		// Process any remaining data in the buffer after the stream ends.
+		// The SDK may not terminate the last chunk with STREAM_SEPARATOR.
+		const remaining = buffer.trim();
+		if (remaining) {
+			try {
+				const chunk = JSON.parse(remaining) as SdkStreamChunk;
+				this.processChunkMessages(chunk, state, writer);
+			} catch {
+				// Ignore unparseable remaining buffer
+			}
 		}
 
 		const responseText = state.collectedTexts.join('\n');

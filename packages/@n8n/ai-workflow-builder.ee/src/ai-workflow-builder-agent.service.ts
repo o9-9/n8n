@@ -193,9 +193,7 @@ export class AiWorkflowBuilderService {
 		// Create resource locator callback scoped to this user if factory is provided
 		const resourceLocatorCallback = this.resourceLocatorCallbackFactory?.(user.id);
 
-		const assistantHandler = this.client
-			? new AssistantHandler(this.client, this.logger)
-			: undefined;
+		const assistantHandler = this.client ? new AssistantHandler(this.client) : undefined;
 
 		const agent = new WorkflowBuilderAgent({
 			parsedNodeTypes: this.nodeTypes,

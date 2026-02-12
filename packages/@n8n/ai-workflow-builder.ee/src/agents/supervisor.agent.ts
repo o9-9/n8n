@@ -17,34 +17,45 @@ import {
 import { summarizeCoordinationLog } from '../utils/coordination-log';
 import type { ChatPayload } from '../workflow-builder-agent';
 
-const systemPrompt = ChatPromptTemplate.fromMessages([
-	[
-		'system',
+function createSupervisorSystemPrompt(enableAssistant: boolean) {
+	return ChatPromptTemplate.fromMessages([
 		[
-			{
-				type: 'text',
-				text: buildSupervisorPrompt(),
-				cache_control: { type: 'ephemeral' },
-			},
+			'system',
+			[
+				{
+					type: 'text',
+					text: buildSupervisorPrompt({ enableAssistant }),
+					cache_control: { type: 'ephemeral' },
+				},
+			],
 		],
-	],
-	['placeholder', '{messages}'],
-]);
+		['placeholder', '{messages}'],
+	]);
+}
 
 /**
- * Schema for supervisor routing decision
+ * Schema for supervisor routing decision.
+ * When `enableAssistant` is true, includes the `assistant` routing option.
  */
-export const supervisorRoutingSchema = z.object({
-	reasoning: z.string().describe('One sentence explaining why this agent should act next'),
-	next: z
-		.enum(['responder', 'discovery', 'builder', 'assistant'])
-		.describe('The next agent to call'),
-});
+export function createSupervisorRoutingSchema(enableAssistant: boolean) {
+	const targets = enableAssistant
+		? (['responder', 'discovery', 'builder', 'assistant'] as const)
+		: (['responder', 'discovery', 'builder'] as const);
+
+	return z.object({
+		reasoning: z.string().describe('One sentence explaining why this agent should act next'),
+		next: z.enum(targets).describe('The next agent to call'),
+	});
+}
+
+export const supervisorRoutingSchema = createSupervisorRoutingSchema(true);
 
 export type SupervisorRouting = z.infer<typeof supervisorRoutingSchema>;
 
 export interface SupervisorAgentConfig {
 	llm: BaseChatModel;
+	/** Whether the assistant subgraph is available for routing. */
+	enableAssistant?: boolean;
 }
 
 /**
@@ -72,8 +83,11 @@ export interface SupervisorContext {
 export class SupervisorAgent {
 	private llm: BaseChatModel;
 
+	private enableAssistant: boolean;
+
 	constructor(config: SupervisorAgentConfig) {
 		this.llm = config.llm;
+		this.enableAssistant = config.enableAssistant ?? false;
 	}
 
 	/**
@@ -127,8 +141,9 @@ export class SupervisorAgent {
 	 * @param config - Optional RunnableConfig for tracing callbacks
 	 */
 	async invoke(context: SupervisorContext, config?: RunnableConfig): Promise<SupervisorRouting> {
-		const agent = systemPrompt.pipe<SupervisorRouting>(
-			this.llm.withStructuredOutput(supervisorRoutingSchema, {
+		const routingSchema = createSupervisorRoutingSchema(this.enableAssistant);
+		const agent = createSupervisorSystemPrompt(this.enableAssistant).pipe<SupervisorRouting>(
+			this.llm.withStructuredOutput(routingSchema, {
 				name: 'routing_decision',
 			}),
 		);

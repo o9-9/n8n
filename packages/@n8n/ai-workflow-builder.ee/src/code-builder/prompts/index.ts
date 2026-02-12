@@ -14,7 +14,6 @@ import type { PlanOutput } from '../../types/planning';
 import { formatPlanAsText } from '../../utils/plan-helpers';
 import type { ExpressionValue } from '../../workflow-builder-agent';
 import { formatCodeWithLineNumbers } from '../handlers/text-editor-handler';
-import { type ConversationEntry, entryToString } from '../utils/code-builder-session';
 import { SDK_IMPORT_STATEMENT } from '../utils/extract-code';
 
 /**
@@ -845,8 +844,8 @@ function buildMandatoryWorkflow(hasPlanOutput: boolean, hasPreSearchResults = fa
  * History context for multi-turn conversations
  */
 export interface HistoryContext {
-	/** Typed conversation entries in this session */
-	conversationEntries: ConversationEntry[];
+	/** Previous user messages in this session */
+	userMessages: string[];
 	/** Compacted summary of older conversations (if any) */
 	previousSummary?: string;
 }
@@ -893,10 +892,10 @@ function buildUserMessageParts(
 	}
 
 	// 2. Previous user requests (raw messages for recent context)
-	if (historyContext?.conversationEntries && historyContext.conversationEntries.length > 0) {
+	if (historyContext?.userMessages && historyContext.userMessages.length > 0) {
 		parts.push('<previous_requests>');
-		historyContext.conversationEntries.forEach((msg, i) => {
-			parts.push(`${i + 1}. ${escapeCurlyBrackets(entryToString(msg))}`);
+		historyContext.userMessages.forEach((msg, i) => {
+			parts.push(`${i + 1}. ${escapeCurlyBrackets(msg)}`);
 		});
 		parts.push('</previous_requests>');
 	}

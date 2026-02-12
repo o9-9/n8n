@@ -33,7 +33,7 @@ export {
 	formatExampleCategorizations,
 	type DiscoveryPromptOptions,
 } from './agents/discovery.prompt';
-export { buildSupervisorPrompt } from './agents/supervisor.prompt';
+export { buildSupervisorPrompt, type SupervisorPromptOptions } from './agents/supervisor.prompt';
 export { buildPlannerPrompt, buildPlannerContext } from './agents/planner.prompt';
 export {
 	buildResponderPrompt,

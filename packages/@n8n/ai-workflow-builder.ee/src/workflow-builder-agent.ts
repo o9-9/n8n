@@ -21,14 +21,7 @@ import { MAX_AI_BUILDER_PROMPT_LENGTH, MAX_MULTI_AGENT_STREAM_ITERATIONS } from 
 
 import { parsePlanDecision } from './agents/planner.agent';
 import type { AssistantHandler } from './assistant';
-import { TriageAgent } from './assistant';
 import { CodeWorkflowBuilder } from './code-builder';
-import {
-	type CodeBuilderSession,
-	loadCodeBuilderSession,
-	saveCodeBuilderSession,
-	generateCodeBuilderThreadId,
-} from './code-builder/utils/code-builder-session';
 import { ValidationError } from './errors';
 import { createMultiAgentWorkflowWithSubgraphs } from './multi-agent-workflow-subgraphs';
 import { SessionManagerService } from './session-manager.service';
@@ -110,6 +103,8 @@ export interface BuilderFeatureFlags {
 	planMode?: boolean;
 	/** Enable introspection tool for diagnostic data collection. Disabled by default. */
 	enableIntrospection?: boolean;
+	/** Enable merged ask/build experience with assistant subgraph (default: false). */
+	mergeAskBuild?: boolean;
 }
 
 export interface ChatPayload {
@@ -261,8 +256,8 @@ export class WorkflowBuilderAgent {
 				return;
 			}
 
-			this.logger?.debug('Routing through triage agent', { userId });
-			yield* this.runTriageAgent(payload, userId, abortSignal);
+			this.logger?.debug('Routing to code workflow builder', { userId });
+			yield* this.runCodeWorkflowBuilder(payload, userId, abortSignal);
 			return;
 		}
 
@@ -294,79 +289,6 @@ export class WorkflowBuilderAgent {
 		});
 
 		yield* codeWorkflowBuilder.chat(payload, userId ?? 'unknown', abortSignal);
-	}
-
-	private async *runTriageAgent(
-		payload: ChatPayload,
-		userId: string | undefined,
-		abortSignal: AbortSignal | undefined,
-	) {
-		if (!this.assistantHandler) {
-			yield* this.runCodeWorkflowBuilder(payload, userId, abortSignal);
-			return;
-		}
-
-		const workflowId = payload.workflowContext?.currentWorkflow?.id;
-		const resolvedUserId = userId ?? 'unknown';
-		let session: CodeBuilderSession | undefined;
-		let threadId: string | undefined;
-
-		if (workflowId) {
-			threadId = generateCodeBuilderThreadId(workflowId, resolvedUserId);
-			session = await loadCodeBuilderSession(this.checkpointer, threadId);
-		}
-
-		const triageAgent = new TriageAgent({
-			llm: this.stageLLMs.builder,
-			assistantHandler: this.assistantHandler,
-			buildWorkflow: (p, u, s) => this.runCodeWorkflowBuilder(p, u, s),
-			logger: this.logger,
-		});
-
-		const gen = triageAgent.run({
-			payload,
-			userId: resolvedUserId,
-			abortSignal,
-			sdkSessionId: session?.sdkSessionId,
-			conversationHistory: session?.conversationEntries,
-		});
-
-		// collectedText is only used for the direct-reply session entry (the else
-		// branch below). It collects all text chunks for simplicity, but the value
-		// is only consumed when neither buildExecuted nor assistantSummary is set.
-		const collectedText: string[] = [];
-		let iterResult = await gen.next();
-		while (!iterResult.done) {
-			yield iterResult.value;
-			for (const msg of iterResult.value.messages ?? []) {
-				if (msg.type === 'message' && 'text' in msg) {
-					collectedText.push(msg.text);
-				}
-			}
-			iterResult = await gen.next();
-		}
-		const outcome = iterResult.value;
-
-		if (session && threadId) {
-			if (outcome.buildExecuted) {
-				// SessionChatHandler saves — no action needed
-			} else if (outcome.assistantSummary) {
-				session.conversationEntries.push({
-					type: 'assistant-exchange',
-					userQuery: payload.message,
-					assistantSummary: outcome.assistantSummary,
-				});
-				session.sdkSessionId = outcome.sdkSessionId;
-				await saveCodeBuilderSession(this.checkpointer, threadId, session);
-			} else {
-				session.conversationEntries.push({
-					type: 'plan',
-					userQuery: payload.message,
-					plan: collectedText.join('\n'),
-				});
-				await saveCodeBuilderSession(this.checkpointer, threadId, session);
-			}
-		}
 	}
 
 	private async *runMultiAgentSystem(

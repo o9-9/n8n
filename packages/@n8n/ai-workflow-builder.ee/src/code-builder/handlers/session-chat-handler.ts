@@ -12,7 +12,6 @@ import type { Logger } from '@n8n/backend-common';
 import type { SessionMessagesChunk, StreamChunk, StreamOutput } from '../../types/streaming';
 import type { ChatPayload } from '../../workflow-builder-agent';
 import type { HistoryContext } from '../prompts';
-import type { ConversationEntry } from '../utils/code-builder-session';
 import {
 	loadCodeBuilderSession,
 	saveCodeBuilderSession,
@@ -88,12 +87,12 @@ export class SessionChatHandler {
 	 * Build history context from session if available.
 	 */
 	private buildHistoryContext(session: {
-		conversationEntries: ConversationEntry[];
+		userMessages: string[];
 		previousSummary?: string;
 	}): HistoryContext | undefined {
-		if (session.conversationEntries.length > 0 || session.previousSummary) {
+		if (session.userMessages.length > 0 || session.previousSummary) {
 			return {
-				conversationEntries: session.conversationEntries,
+				userMessages: session.userMessages,
 				previousSummary: session.previousSummary,
 			};
 		}
@@ -152,7 +151,7 @@ export class SessionChatHandler {
 
 		this.logger?.debug('Loaded CodeBuilder session', {
 			threadId,
-			conversationEntriesCount: session.conversationEntries.length,
+			userMessagesCount: session.userMessages.length,
 			hasPreviousSummary: !!session.previousSummary,
 		});
 
@@ -176,7 +175,7 @@ export class SessionChatHandler {
 		}
 
 		// Save current message to session
-		session.conversationEntries.push({ type: 'build-request', message: payload.message });
+		session.userMessages.push(payload.message);
 		await saveCodeBuilderSession(this.checkpointer, threadId, session);
 
 		// Save full message history for frontend retrieval
@@ -207,7 +206,7 @@ export class SessionChatHandler {
 
 		this.logger?.debug('Saved CodeBuilder session', {
 			threadId,
-			newEntryCount: session.conversationEntries.length,
+			newMessageCount: session.userMessages.length,
 		});
 	}
 }
