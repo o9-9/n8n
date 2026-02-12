@@ -124,7 +124,7 @@ export class TriageAgent {
 		}
 		const llmWithTools = this.llm.bindTools([ASK_ASSISTANT_TOOL, BUILD_WORKFLOW_TOOL]);
 
-		const conversationEntryToString = (entry: PlanningConversationEntry): string => {
+		const conversationEntryToString = (entry: TriageConversationEntry): string => {
 			switch (entry.type) {
 				case 'build-request':
 					return entry.message;
