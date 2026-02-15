@@ -143,3 +143,5 @@ minimumReleaseAgeExclude:
   - vm2
   - tar
   - qs
+  # Renovate security update: jws@3@3.2.3
+  - jws@3@3.2.3
