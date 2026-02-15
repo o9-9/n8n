@@ -143,3 +143,5 @@ minimumReleaseAgeExclude:
   - vm2
   - tar
   - qs
+  # Renovate security update: expr-eval@2.0.2@3.0.1
+  - expr-eval@2.0.2@3.0.1
